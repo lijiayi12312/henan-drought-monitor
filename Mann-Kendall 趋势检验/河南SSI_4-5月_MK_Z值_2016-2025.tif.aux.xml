@@ -1,0 +1,27 @@
+<PAMDataset>
+  <PAMRasterBand band="1">
+    <Description>Mann-Kendall Z</Description>
+    <Histograms>
+      <HistItem>
+        <HistMin>-1.788854360580444</HistMin>
+        <HistMax>0.3577708899974823</HistMax>
+        <BucketCount>256</BucketCount>
+        <IncludeOutOfRange>1</IncludeOutOfRange>
+        <Approximate>0</Approximate>
+        <HistCounts>1|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|2|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|20|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|44|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|40|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|32|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|19|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|30|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|22|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|26|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|16|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|5|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|1</HistCounts>
+      </HistItem>
+    </Histograms>
+    <Metadata>
+      <MDI key="STATISTICS_MINIMUM">-1.7888543605804</MDI>
+      <MDI key="STATISTICS_MAXIMUM">0.35777088999748</MDI>
+      <MDI key="STATISTICS_MEAN">-0.78002372713283</MDI>
+      <MDI key="STATISTICS_STDDEV">0.46405109265994</MDI>
+      <MDI key="STATISTICS_MEDIAN">-0.896532</MDI>
+      <MDI key="STATISTICS_COUNT">258.000000</MDI>
+      <MDI key="STATISTICS_SKIPFACTORX">1</MDI>
+      <MDI key="STATISTICS_SKIPFACTORY">1</MDI>
+      <MDI key="STATISTICS_EXCLUDEDVALUES"></MDI>
+      <MDI key="STATISTICS_COVARIANCES">0.215343416598885</MDI>
+    </Metadata>
+  </PAMRasterBand>
+</PAMDataset>

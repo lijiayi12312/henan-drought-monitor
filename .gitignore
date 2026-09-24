@@ -1,0 +1,18 @@
+# Python 运行时产物
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# IDE / 工作区本地配置
+.vscode/
+*.code-workspace
+.trae/
+.idea/
+
+# 系统杂项
+Thumbs.db
+.DS_Store
+
+# Streamlit 本地密钥 (切勿提交)
+.streamlit/secrets.toml
