@@ -9,6 +9,8 @@
 运行:  python -m streamlit run app.py  (本地需设 PYTHONPATH=C:\\pylibs; 云端由 requirements.txt 提供依赖)
 依赖:  见 requirements.txt
 """
+import base64
+import io
 import sys
 from pathlib import Path
 
@@ -219,6 +221,92 @@ LAYER_STYLE = {
 }
 
 
+# ---------------- 渲染函数 (缓存) ----------------
+@st.cache_data
+def render_layer_png(layer_key, band_idx=0):
+    """图层 -> matplotlib PNG (data URI) + 数据范围。
+    layer_key: "SSI" / 图层名 / 高风险预警名; 结果缓存, 同图层只渲染一次,
+    切换月份/图层或点击地图的重跑直接复用, 免费版弱 CPU 下提速明显。"""
+    if layer_key == "SSI":
+        arr = load_ssi()[0][band_idx]
+        vmin, vmax, flip, cmap_name, interp = -2.0, 2.0, True, "RdYlBu_r", "bilinear"
+    elif layer_key == HIGH_RISK:
+        risk_mask, risk_valid, _ = load_high_risk()
+        vmin = vmax = None
+        interp = "nearest"
+    else:
+        arr = load_layer(str(LAYER_PATHS[layer_key]))
+        cfg = LAYER_STYLE[layer_key]
+        vmin, vmax = cfg["vmin"], cfg["vmax"]
+        if vmin is None:  # Sen斜率: 用数据实际范围
+            vmin, vmax = float(np.nanmin(arr)), float(np.nanmax(arr))
+        flip, cmap_name, interp = cfg["flip"], cfg["cmap"], "bilinear"
+
+    # 生成 RGBA: 风险图层只渲染非风险淡灰轮廓 (高风险区改用矢量多边形), 其余为连续渐变
+    if layer_key == HIGH_RISK:
+        rgba = np.zeros((*risk_mask.shape, 4))
+        rgba[risk_valid] = (0.93, 0.93, 0.93, 0.95)  # 非风险有效区: 极淡灰显示省域轮廓
+        grid = risk_mask.shape
+        print(f"=== 图层调试 [{HIGH_RISK}] 高风险像元={int(risk_mask.sum())} / {int(risk_valid.sum())} (矢量多边形渲染) ===")
+    else:
+        # 归一化到 [0,1], 按图层色带取色 (flip 时用 1-t 使低值=色带高端)
+        cmap = plt.get_cmap(cmap_name)
+        t = np.clip((arr - vmin) / (vmax - vmin), 0, 1)
+        rgba = cmap(1.0 - t if flip else t)  # (rows, cols, 4) float 0~1
+        rgba[~np.isfinite(arr)] = 0.0  # NoData 完全透明
+        grid = arr.shape
+        print(f"=== 图层调试 [{layer_key}] cmap={cmap_name} vmin={vmin:.3g} vmax={vmax:.3g} flip={flip} 有效像元={int(np.isfinite(arr).sum())} ===")
+
+    # matplotlib 渲染为 PNG (bilinear 插值形成连续面), 转 base64 data URI
+    fig = plt.figure(figsize=(grid[1] / 10, grid[0] / 10), dpi=100)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.axis("off")
+    ax.imshow(rgba, interpolation=interp)  # 行序北在上, origin 默认 upper 即正确
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", transparent=True)
+    plt.close(fig)
+    img_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    return img_uri, vmin, vmax
+
+
+@st.cache_data
+def render_legend_png(is_risk, vmin, vmax, flip, cmap_name, ticks, label):
+    """图例 -> PNG bytes (缓存); ticks 需传 tuple (可哈希)。"""
+    from matplotlib.patches import FancyBboxPatch, Patch
+
+    fig = plt.figure(figsize=(6, 0.75), dpi=130)
+    fig.patch.set_alpha(0.0)
+    if is_risk:
+        ax = fig.add_axes([0.06, 0.30, 0.88, 0.40])
+        ax.patch.set_alpha(0.0)
+        ax.axis("off")
+        handles = [Patch(facecolor=(210 / 255, 50 / 255, 50 / 255, 0.75), edgecolor="#961414",
+                         linewidth=1.2, label="高风险区（红色）"),
+                   Patch(facecolor="#ededed", edgecolor="#c8c8c8", linewidth=0.6, label="非风险区（灰色）")]
+        ax.legend(handles=handles, loc="center", ncol=2, frameon=False, fontsize=9)
+        ax.set_title(label, fontsize=9, color="#444444", pad=2)
+    else:
+        ax = fig.add_axes([0.06, 0.40, 0.88, 0.30])  # 内边距: 四周留白
+        ax.patch.set_alpha(0.0)
+        norm = mpl_colors.Normalize(vmin=vmin, vmax=vmax)
+        # colorbar 用 cmap(t) 取值; 地图 flip 时用 cmap(1-t), 因此图例色带需取反
+        bar_cmap = plt.get_cmap(cmap_name).reversed() if flip else plt.get_cmap(cmap_name)
+        fig.colorbar(mpl_cm.ScalarMappable(norm=norm, cmap=bar_cmap),
+                     cax=ax, orientation="horizontal", ticks=list(ticks))
+        ax.set_xlabel(label, fontsize=9)
+        ax.tick_params(labelsize=9, length=2)
+    # 圆角矩形底板
+    card = FancyBboxPatch((0.015, 0.06), 0.97, 0.88,
+                          boxstyle="round,pad=0.012,rounding_size=0.06",
+                          transform=fig.transFigure, facecolor="white",
+                          edgecolor="#e3e3e3", linewidth=0.8, zorder=-10)
+    fig.add_artist(card)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", transparent=True)
+    plt.close(fig)
+    return buf.getvalue()
+
+
 # ---------------- 页面 ----------------
 st.set_page_config(page_title="河南土壤水分干旱监测平台", layout="wide")
 st.title("河南土壤水分干旱监测平台 (2016–2025, 4–5 月 SSI)")
@@ -248,53 +336,25 @@ st.sidebar.caption(LAYER_DESC[layer_choice])
 band_idx = MONTHS.index(month)
 is_risk = layer_choice == HIGH_RISK
 if layer_choice == "SSI":
-    arr_show = cube[band_idx]
-    vmin, vmax, flip = -2.0, 2.0, True   # flip: SSI 低=红(干旱), 高=蓝(湿润)
-    cmap_name = "RdYlBu_r"
+    img_uri, vmin, vmax = render_layer_png("SSI", band_idx)  # flip: SSI 低=红(干旱), 高=蓝(湿润)
+    flip, cmap_name = True, "RdYlBu_r"
     label = "红=干旱 (SSI≤-1), 黄=正常, 蓝=湿润 (SSI>0)"
     ticks = [-2, -1, 0, 1, 2]
 elif is_risk:
     risk_mask, risk_valid, risk_criteria = load_high_risk()
+    img_uri, _, _ = render_layer_png(HIGH_RISK)
+    vmin = vmax = flip = cmap_name = None  # 风险图层无连续色带, 图例走分类分支
+    ticks = ()
     label = "红色区域 = 未来持续变干高风险预警区 (静态图层, 不随月份变化)"
 else:
-    arr_show = load_layer(str(LAYER_PATHS[layer_choice]))
+    img_uri, vmin, vmax = render_layer_png(layer_choice)
     st_cfg = LAYER_STYLE[layer_choice]
-    vmin, vmax = st_cfg["vmin"], st_cfg["vmax"]
-    if vmin is None:  # Sen斜率: 用数据实际范围
-        vmin, vmax = float(np.nanmin(arr_show)), float(np.nanmax(arr_show))
+    if st_cfg["vmin"] is not None:  # Sen斜率 (None) 已在渲染函数内取数据实际范围
+        vmin, vmax = st_cfg["vmin"], st_cfg["vmax"]
     flip = st_cfg["flip"]
     cmap_name = st_cfg["cmap"]
     label = st_cfg["label"] + " (静态图层, 不随月份变化)"
     ticks = st_cfg["ticks"] or np.linspace(vmin, vmax, 5).round(3).tolist()
-
-# 生成 RGBA: 风险图层只渲染非风险淡灰轮廓 (高风险区改用矢量多边形), 其余为连续渐变
-if is_risk:
-    rgba = np.zeros((*risk_mask.shape, 4))
-    rgba[risk_valid] = (0.93, 0.93, 0.93, 0.95)      # 非风险有效区: 极淡灰显示省域轮廓
-    interp = "nearest"
-    print(f"=== 图层调试 [{HIGH_RISK}] 高风险像元={int(risk_mask.sum())} / {int(risk_valid.sum())} (矢量多边形渲染) ===")
-else:
-    # 归一化到 [0,1], 按图层色带取色 (flip 时用 1-t 使低值=色带高端)
-    cmap = plt.get_cmap(cmap_name)
-    t = np.clip((arr_show - vmin) / (vmax - vmin), 0, 1)
-    rgba = cmap(1.0 - t if flip else t)      # (rows, cols, 4) float 0~1
-    rgba[~np.isfinite(arr_show)] = 0.0       # NoData 完全透明
-    interp = "bilinear"
-    print(f"=== 图层调试 [{layer_choice}] cmap={cmap_name} vmin={vmin:.3g} vmax={vmax:.3g} flip={flip} 有效像元={int(np.isfinite(arr_show).sum())} ===")
-
-# matplotlib 渲染为 PNG (bilinear 插值形成连续面), 转 base64 data URI
-import base64
-import io
-
-_grid = risk_mask.shape if is_risk else arr_show.shape
-fig = plt.figure(figsize=(_grid[1] / 10, _grid[0] / 10), dpi=100)
-ax = fig.add_axes([0, 0, 1, 1])
-ax.axis("off")
-ax.imshow(rgba, interpolation=interp)  # 行序北在上, origin 默认 upper 即正确
-buf = io.BytesIO()
-fig.savefig(buf, format="png", transparent=True)
-plt.close(fig)
-img_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
 # ---- folium 地图: matplotlib 渐变 PNG -> ImageOverlay 贴图 (保持连续面效果) ----
 # 底图: Esri.WorldGrayCanvas (免费无需 API Key; Carto 已强制 Key, 会出现水印)
@@ -363,40 +423,9 @@ res = st_folium(
     m, height=620, use_container_width=True,
     returned_objects=["last_clicked"], key="map",
 )
-# ---- 图例 (圆角矩形卡片; 风险图层为两色分类图例, 其余为渐变条) ----
-from matplotlib.patches import FancyBboxPatch, Patch
-
-if is_risk:
-    fig = plt.figure(figsize=(6, 0.75), dpi=130)
-    fig.patch.set_alpha(0.0)
-    ax = fig.add_axes([0.06, 0.30, 0.88, 0.40])
-    ax.patch.set_alpha(0.0)
-    ax.axis("off")
-    handles = [Patch(facecolor=(210 / 255, 50 / 255, 50 / 255, 0.75), edgecolor="#961414",
-                     linewidth=1.2, label="高风险区（红色）"),
-               Patch(facecolor="#ededed", edgecolor="#c8c8c8", linewidth=0.6, label="非风险区（灰色）")]
-    ax.legend(handles=handles, loc="center", ncol=2, frameon=False, fontsize=9)
-    ax.set_title(label, fontsize=9, color="#444444", pad=2)
-else:
-    fig = plt.figure(figsize=(6, 0.75), dpi=130)
-    fig.patch.set_alpha(0.0)
-    ax = fig.add_axes([0.06, 0.40, 0.88, 0.30])  # 内边距: 四周留白
-    ax.patch.set_alpha(0.0)
-    norm = mpl_colors.Normalize(vmin=vmin, vmax=vmax)
-    # colorbar 用 cmap(t) 取值; 地图 flip 时用 cmap(1-t), 因此图例色带需取反
-    bar_cmap = plt.get_cmap(cmap_name).reversed() if flip else plt.get_cmap(cmap_name)
-    fig.colorbar(mpl_cm.ScalarMappable(norm=norm, cmap=bar_cmap),
-                 cax=ax, orientation="horizontal", ticks=ticks)
-    ax.set_xlabel(label, fontsize=9)
-    ax.tick_params(labelsize=9, length=2)
-# 圆角矩形底板
-card = FancyBboxPatch((0.015, 0.06), 0.97, 0.88,
-                      boxstyle="round,pad=0.012,rounding_size=0.06",
-                      transform=fig.transFigure, facecolor="white",
-                      edgecolor="#e3e3e3", linewidth=0.8, zorder=-10)
-fig.add_artist(card)
-st.pyplot(fig, width="content")
-plt.close(fig)
+# ---- 图例 (圆角矩形卡片; 风险图层为两色分类图例, 其余为渐变条; 渲染结果缓存) ----
+legend_png = render_legend_png(is_risk, vmin, vmax, flip, cmap_name, tuple(ticks), label)
+st.image(legend_png, use_container_width=True)
 
 # ---- 统计面板 ----
 def _nearest_cities(mask):
