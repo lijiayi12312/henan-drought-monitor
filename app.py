@@ -60,6 +60,8 @@ LAYER_PATHS = {
 MONTHS = [f"{y}-{m:02d}" for y in range(2016, 2026) for m in (4, 5)]  # 20 个波段
 CITY_SHP = ROOT / "河南省市shp" / "河南省.shp"
 EVENTS_CSV = ROOT / "游程理论" / "河南SSI_4-5月_干旱事件_按真实时间_2016-2025.csv"
+YIELD_STATS_CSV = ROOT / "city_yield_analysis.csv"          # 各市 SSI-产量关系统计 (yield_ssi_analysis.py 生成)
+YIELD_SERIES_CSV = ROOT / "city_yield_ssi_timeseries.csv"   # 各市逐年 产量距平 x 4-5月SSI (同上)
 
 
 # ---------------- 数据加载 (缓存) ----------------
@@ -176,6 +178,47 @@ def load_events():
     df["行"] = df["行"].astype(int)
     df["列"] = df["列"].astype(int)
     return df
+
+
+def norm_city(name):
+    """城市名规整: 去"示范区"/"市"后缀, 对齐 shp 与产量统计表 (济源市/济源示范区 -> 济源)"""
+    n = str(name).strip()
+    for suf in ("示范区", "市"):
+        if n.endswith(suf) and len(n) > len(suf):
+            return n[: -len(suf)]
+    return n
+
+
+@st.cache_data
+def load_yield_stats():
+    """各市 SSI-产量关系统计 (city_yield_analysis.csv, 含规整 key 列)"""
+    return pd.read_csv(YIELD_STATS_CSV, encoding="utf-8-sig")
+
+
+@st.cache_data
+def load_yield_series():
+    """各市逐年 产量距平 x 4-5月SSI (city_yield_ssi_timeseries.csv); 2025 年仅 SSI"""
+    return pd.read_csv(YIELD_SERIES_CSV, encoding="utf-8-sig")
+
+
+@st.cache_data
+def load_city_gdf():
+    """地级市边界 GeoDataFrame (EPSG:4326), 供 点击坐标->所属城市 空间匹配"""
+    import geopandas as gpd
+
+    gdf = gpd.read_file(CITY_SHP, encoding="utf-8")
+    if gdf.crs and gdf.crs.to_epsg() != 4326:
+        gdf = gdf.to_crs(4326)
+    return gdf[["name", "geometry"]]
+
+
+def find_city_name(lon, lat):
+    """点击坐标 -> 所属地级市名; 不在任何市界内时返回 None"""
+    from shapely.geometry import Point
+
+    gdf = load_city_gdf()
+    hit = gdf[gdf.geometry.contains(Point(lon, lat))]
+    return str(hit.iloc[0]["name"]) if len(hit) else None
 
 
 @st.cache_data
@@ -506,6 +549,60 @@ if st.session_state.get("click"):
         yaxis_title="SSI", xaxis_title="月份",
     )
     st.plotly_chart(fig_px, use_container_width=True)
+
+    # ---- 产量影响评估 (点击点所属城市; 面板内容随点击城市切换) ----
+    city = find_city_name(cl["lon"], cl["lat"])
+    st.subheader(f"产量影响评估 · {city}" if city else "产量影响评估")
+    if city is None:
+        st.info("点击位置不在任何地级市界内, 无法匹配产量统计数据")
+    else:
+        key = norm_city(city)
+        _sr = load_yield_stats()
+        _sr = _sr[_sr["key"] == key]
+        _ser = load_yield_series()
+        _ser = _ser[_ser["key"] == key].sort_values("年份")
+        if _sr.empty or _ser.empty:
+            st.info(f"{city} 暂无产量统计数据")
+        else:
+            sr = _sr.iloc[0]
+            r_v, p_v = float(sr["Pearson_r"]), float(sr["p值"])
+            # 中度以上 (中度+重度) 干旱: 按样本数加权合并平均减产率
+            _lv, _wt = [], []
+            for _c, _n in (("中度平均减产率%", "中度样本"), ("重度平均减产率%", "重度样本")):
+                if int(sr[_n]) > 0 and np.isfinite(sr[_c]):
+                    _lv.append(float(sr[_c])); _wt.append(int(sr[_n]))
+            mod_plus = float(np.average(_lv, weights=_wt)) if _lv else np.nan
+            y1, y2, y3 = st.columns(3)
+            y1.metric("SSI-产量相关系数 r", f"{r_v:+.2f}" if np.isfinite(r_v) else "—",
+                      help="产量距平 与 4-5月SSI 的 Pearson 相关; 负值 = 越干旱越减产")
+            y2.metric("显著性 p 值", (f"{p_v:.3f}" if np.isfinite(p_v) else "—")
+                      + (" (显著)" if np.isfinite(p_v) and p_v < 0.05 else ""))
+            y3.metric("中度以上干旱平均减产率",
+                      f"{mod_plus:+.1f}%" if np.isfinite(mod_plus) else "无样本",
+                      help="SSI ≤ -1.0 年份的产量相对趋势值平均偏差; 负值 = 减产")
+            # 双 Y 轴对比: 左轴 产量距平 (柱), 右轴 4-5月SSI (线)
+            fig_y = go.Figure()
+            fig_y.add_trace(go.Bar(
+                x=_ser["年份"], y=_ser["距平"], name="产量距平 (万吨, 左轴)",
+                marker_color=np.where(_ser["距平"] >= 0, "#7aa6d8", "#d23232"),
+                opacity=0.8,
+            ))
+            fig_y.add_trace(go.Scatter(
+                x=_ser["年份"], y=_ser["SSI"], name="4-5月 SSI (右轴)",
+                mode="lines+markers", yaxis="y2",
+                line=dict(color="#1a1a1a", width=2), marker=dict(size=7),
+            ))
+            fig_y.update_layout(
+                height=340, margin=dict(l=10, r=10, t=10, b=10),
+                hovermode="x unified",
+                yaxis=dict(title="产量距平 (万吨)", zeroline=True, zerolinecolor="#888"),
+                yaxis2=dict(title="SSI", overlaying="y", side="right",
+                            zeroline=True, zerolinecolor="#d23232"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            )
+            st.plotly_chart(fig_y, use_container_width=True)
+            st.caption("柱=产量距平 (左轴, 负值=减产), 线=4-5月SSI (右轴, 越低越旱); "
+                       "产量数据 2016-2024, SSI 2016-2025。若 SSI 低点常对应负距平柱, 则干旱减产成立。")
 
     # ---- 干旱事件列表 (游程理论, 按 行/列 精确匹配点击像元) ----
     ev_px = load_events()
