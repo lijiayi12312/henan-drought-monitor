@@ -50,7 +50,7 @@ matplotlib.rcParams["axes.unicode_minus"] = False
 # ---------------- 数据路径 ----------------
 # app.py 所在目录, 本地 (Windows) 与 Streamlit Cloud (Linux) 通用
 ROOT = Path(__file__).resolve().parent
-SSI_PATH = ROOT / "4-5月河南SSI" / "4-5月河南SSI_2016-2025.tif"
+SSI_PATH = ROOT / "4-5月河南SSI" / "4-5月河南SSI_swvl1_2016-2025.tif"  # 表层 swvl1 (0-7cm) 主数据源
 LAYER_PATHS = {
     "干旱频率": ROOT / "干旱频率" / "河南SSI_4-5月_干旱频率_2016-2025.tif",
     "MK Z值": ROOT / "Mann-Kendall 趋势检验" / "河南SSI_4-5月_MK_Z值_2016-2025.tif",
@@ -538,7 +538,7 @@ mean_ssi = np.nanmean(cube, axis=(1, 2))
 df_mean = pd.DataFrame({"月份": MONTHS, "全省平均SSI": mean_ssi}).set_index("月份")
 st.line_chart(df_mean, x_label="月份", y_label="SSI")
 
-# ---- 层位对比: 五层 SSI x 冬小麦产量相关系数 (数据驱动, 与 plot_layer_corr_bar.py 同风格) ----
+# ---- 层位对比: 五层 SSI x 冬小麦产量相关系数 (数据驱动, 深色主题透明背景) ----
 st.subheader("五层 SSI × 冬小麦产量相关系数")
 try:
     _corr = load_layer_corr().sort_values("相关系数r", key=lambda s: s.abs(), ascending=False)
@@ -546,23 +546,31 @@ try:
     def _sig_stars(p):
         return "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else ""))
 
-    _colors = ["#c80000" if p < 0.05 else "#c8c8c8" for p in _corr["p值"]]
+    # 深色主题: 显著砖红 [200,70,70] / 不显著深灰 [100,100,100]; 背景全透明
+    _colors = ["rgb(200,70,70)" if p < 0.05 else "rgb(100,100,100)" for p in _corr["p值"]]
+    _txt_color = "#e6e6e6"      # 浅灰白文字, 深色背景上清晰
+    _axis_color = "#b3b3b3"
     fig_corr = go.Figure(go.Bar(
         x=_corr["层级"], y=_corr["相关系数r"],
         marker_color=_colors,
         text=[f"{r:.2f}{_sig_stars(p)}" for r, p in zip(_corr["相关系数r"], _corr["p值"])],
-        textposition="outside", textfont=dict(size=14, color="#333333"),
+        textposition="outside", textfont=dict(size=18, color=_txt_color),
         hovertemplate="%{x}<br>r = %{y:.3f}<extra></extra>",
     ))
-    fig_corr.add_hline(y=0, line_width=1, line_color="#666666")
+    fig_corr.add_hline(y=0, line_width=1, line_color="#888888")
     fig_corr.update_layout(
-        height=360, margin=dict(l=10, r=10, t=30, b=10),
-        yaxis=dict(range=[-0.4, 0.2], title="Pearson r", zeroline=False),
-        xaxis_title=None, plot_bgcolor="white",
+        height=400, margin=dict(l=10, r=10, t=36, b=10),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=_txt_color),
+        yaxis=dict(range=[-0.42, 0.2], title=dict(text="Pearson r", font=dict(size=15, color=_axis_color)),
+                   showgrid=False, zeroline=False, showline=True, linecolor=_axis_color,
+                   tickfont=dict(size=13, color=_axis_color)),
+        xaxis=dict(showgrid=False, showline=True, linecolor=_axis_color,
+                   tickfont=dict(size=15, color=_txt_color), tickangle=-18),
     )
     st.plotly_chart(fig_corr, use_container_width=True)
-    st.caption("深红色 = 显著相关（p<0.05，* p<0.05，** p<0.01，*** p<0.001）；浅灰色 = 不显著。"
-               "0-28cm 浅层根区与产量相关性最强，深层土壤水分对产量指示意义弱。")
+    st.caption("表层（0-7cm）和浅层根区（0-28cm）均与产量显著负相关，深层（28-100cm）及全根区加权均不显著。"
+               "说明冬小麦关键期干旱监测应聚焦 0-28cm，深层土壤水分对产量指示意义弱。")
 except Exception as exc:
     st.info(f"层位对比数据暂不可用（{exc}）")
 
