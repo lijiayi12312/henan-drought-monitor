@@ -62,6 +62,7 @@ CITY_SHP = ROOT / "河南省市shp" / "河南省.shp"
 EVENTS_CSV = ROOT / "游程理论" / "河南SSI_4-5月_干旱事件_按真实时间_2016-2025.csv"
 YIELD_STATS_CSV = ROOT / "city_yield_analysis.csv"          # 各市 SSI-产量关系统计 (yield_ssi_analysis.py 生成)
 YIELD_SERIES_CSV = ROOT / "city_yield_ssi_timeseries.csv"   # 各市逐年 产量距平 x 4-5月SSI (同上)
+LAYER_CORR_CSV = ROOT / "产量关联分析" / "层级产量关联对比表.csv"  # 五层 SSI-产量相关系数 (yield_ssi_analysis_layers.py)
 
 
 # ---------------- 数据加载 (缓存) ----------------
@@ -210,6 +211,12 @@ def load_city_gdf():
     if gdf.crs and gdf.crs.to_epsg() != 4326:
         gdf = gdf.to_crs(4326)
     return gdf[["name", "geometry"]]
+
+
+@st.cache_data
+def load_layer_corr():
+    """五层 SSI-产量相关系数对比表 (层级/相关系数r/p值/分级减产率)"""
+    return pd.read_csv(LAYER_CORR_CSV, encoding="utf-8-sig")
 
 
 def find_city_name(lon, lat):
@@ -530,6 +537,34 @@ st.subheader("全省平均 SSI 时间变化 (2016–2025, 4–5 月)")
 mean_ssi = np.nanmean(cube, axis=(1, 2))
 df_mean = pd.DataFrame({"月份": MONTHS, "全省平均SSI": mean_ssi}).set_index("月份")
 st.line_chart(df_mean, x_label="月份", y_label="SSI")
+
+# ---- 层位对比: 五层 SSI x 冬小麦产量相关系数 (数据驱动, 与 plot_layer_corr_bar.py 同风格) ----
+st.subheader("五层 SSI × 冬小麦产量相关系数")
+try:
+    _corr = load_layer_corr().sort_values("相关系数r", key=lambda s: s.abs(), ascending=False)
+
+    def _sig_stars(p):
+        return "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else ""))
+
+    _colors = ["#c80000" if p < 0.05 else "#c8c8c8" for p in _corr["p值"]]
+    fig_corr = go.Figure(go.Bar(
+        x=_corr["层级"], y=_corr["相关系数r"],
+        marker_color=_colors,
+        text=[f"{r:.2f}{_sig_stars(p)}" for r, p in zip(_corr["相关系数r"], _corr["p值"])],
+        textposition="outside", textfont=dict(size=14, color="#333333"),
+        hovertemplate="%{x}<br>r = %{y:.3f}<extra></extra>",
+    ))
+    fig_corr.add_hline(y=0, line_width=1, line_color="#666666")
+    fig_corr.update_layout(
+        height=360, margin=dict(l=10, r=10, t=30, b=10),
+        yaxis=dict(range=[-0.4, 0.2], title="Pearson r", zeroline=False),
+        xaxis_title=None, plot_bgcolor="white",
+    )
+    st.plotly_chart(fig_corr, use_container_width=True)
+    st.caption("深红色 = 显著相关（p<0.05，* p<0.05，** p<0.01，*** p<0.001）；浅灰色 = 不显著。"
+               "0-28cm 浅层根区与产量相关性最强，深层土壤水分对产量指示意义弱。")
+except Exception as exc:
+    st.info(f"层位对比数据暂不可用（{exc}）")
 
 # ---- 折线图: 点击像元的 20 个月 SSI (plotly) ----
 st.subheader("点击位置 SSI 序列 (20 个月)")
