@@ -47,28 +47,46 @@ else:
     matplotlib.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
 matplotlib.rcParams["axes.unicode_minus"] = False
 
-# ---------------- 数据路径 ----------------
+# ---------------- 数据路径 (按土壤水分版本组织) ----------------
 # app.py 所在目录, 本地 (Windows) 与 Streamlit Cloud (Linux) 通用
 ROOT = Path(__file__).resolve().parent
-SSI_PATH = ROOT / "4-5月河南SSI" / "4-5月河南SSI_swvl1_2016-2025.tif"  # 表层 swvl1 (0-7cm) 主数据源
-LAYER_PATHS = {
-    "干旱频率": ROOT / "干旱频率" / "河南SSI_4-5月_干旱频率_2016-2025.tif",
-    "MK Z值": ROOT / "Mann-Kendall 趋势检验" / "河南SSI_4-5月_MK_Z值_2016-2025.tif",
-    "Sen斜率": ROOT / "Mann-Kendall 趋势检验" / "河南SSI_4-5月_MK_Sen斜率_2016-2025.tif",
-    "Hurst指数": ROOT / "hurst指数" / "河南SSI_4-5月_Hurst指数_2016-2025.tif",
-}
-MONTHS = [f"{y}-{m:02d}" for y in range(2016, 2026) for m in (4, 5)]  # 20 个波段
 CITY_SHP = ROOT / "河南省市shp" / "河南省.shp"
-EVENTS_CSV = ROOT / "游程理论" / "河南SSI_4-5月_干旱事件_按真实时间_2016-2025.csv"
-YIELD_STATS_CSV = ROOT / "city_yield_analysis.csv"          # 各市 SSI-产量关系统计 (yield_ssi_analysis.py 生成)
-YIELD_SERIES_CSV = ROOT / "city_yield_ssi_timeseries.csv"   # 各市逐年 产量距平 x 4-5月SSI (同上)
-LAYER_CORR_CSV = ROOT / "产量关联分析" / "层级产量关联对比表.csv"  # 五层 SSI-产量相关系数 (yield_ssi_analysis_layers.py)
+MONTHS = [f"{y}-{m:02d}" for y in range(2016, 2026) for m in (4, 5)]  # 20 个波段
+
+# 每个版本一套完整的输入: 多波段 SSI / 五项分析图层 / 游程事件 / 产量统计与时序
+VERSIONS = {
+    "浅层根区（0-28cm）": {
+        "ssi": ROOT / "4-5月河南SSI" / "4-5月河南SSI_shallow_2016-2025.tif",
+        "layers": {
+            "干旱频率": ROOT / "干旱频率" / "河南浅层SSI_4-5月_干旱频率_2016-2025.tif",
+            "MK Z值": ROOT / "Mann-Kendall 趋势检验" / "河南浅层SSI_4-5月_MK_Z值_2016-2025.tif",
+            "Sen斜率": ROOT / "Mann-Kendall 趋势检验" / "河南浅层SSI_4-5月_MK_Sen斜率_2016-2025.tif",
+            "Hurst指数": ROOT / "hurst指数" / "河南浅层SSI_4-5月_Hurst指数_2016-2025.tif",
+        },
+        "events": ROOT / "游程理论" / "河南浅层SSI_4-5月_干旱事件_按真实时间_2016-2025.csv",
+        "yield_stats": ROOT / "产量关联分析" / "city_yield_analysis_shallow.csv",
+        "yield_series": ROOT / "产量关联分析" / "city_yield_ssi_timeseries_shallow.csv",
+    },
+    "表层（0-7cm）": {
+        "ssi": ROOT / "4-5月河南SSI" / "4-5月河南SSI_swvl1_2016-2025.tif",
+        "layers": {
+            "干旱频率": ROOT / "干旱频率" / "河南SSI_4-5月_干旱频率_2016-2025.tif",
+            "MK Z值": ROOT / "Mann-Kendall 趋势检验" / "河南SSI_4-5月_MK_Z值_2016-2025.tif",
+            "Sen斜率": ROOT / "Mann-Kendall 趋势检验" / "河南SSI_4-5月_MK_Sen斜率_2016-2025.tif",
+            "Hurst指数": ROOT / "hurst指数" / "河南SSI_4-5月_Hurst指数_2016-2025.tif",
+        },
+        "events": ROOT / "游程理论" / "河南SSI_4-5月_干旱事件_按真实时间_2016-2025.csv",
+        "yield_stats": ROOT / "city_yield_analysis.csv",
+        "yield_series": ROOT / "city_yield_ssi_timeseries.csv",
+    },
+}
+LAYER_CORR_CSV = ROOT / "产量关联分析" / "层级产量关联对比表.csv"  # 五层 SSI-产量相关系数 (跨版本, 不随切换变)
 
 
 # ---------------- 数据加载 (缓存) ----------------
 @st.cache_data
-def load_ssi():
-    with rasterio.open(SSI_PATH) as src:
+def load_ssi(version):
+    with rasterio.open(VERSIONS[version]["ssi"]) as src:
         cube = src.read().astype(np.float64)
         nodata = src.nodata
         cube[cube <= nodata] = np.nan
@@ -89,14 +107,13 @@ def load_layer(path_str):
 
 
 @st.cache_data
-def load_high_risk():
+def load_high_risk(version):
     """未来高风险预警像元:
     判据: Sen斜率 <= 全省最负 20% 分位 (变干最快的前两成像元) 且 Hurst > 0.5 (趋势持续)
-    选型说明: 更严的三条件判据 (干旱频率>0.6 & Sen<-0.05 & Hurst>0.6) 仅命中 16 像元
-    (6.2%), 低于预警图 10%~25% 的合理占比; 本判据命中 46 像元 (17.8%), 在目标区间内。
     返回 (风险掩膜, 有效掩膜, 判据说明文字)"""
-    s = load_layer(str(LAYER_PATHS["Sen斜率"]))
-    h = load_layer(str(LAYER_PATHS["Hurst指数"]))
+    layers = VERSIONS[version]["layers"]
+    s = load_layer(str(layers["Sen斜率"]))
+    h = load_layer(str(layers["Hurst指数"]))
     valid = np.isfinite(s) & np.isfinite(h)
     q20 = float(np.quantile(s[valid], 0.2))  # Sen 斜率最负的前 20% 分位
     risk = (s <= q20) & (h > 0.5)
@@ -104,7 +121,7 @@ def load_high_risk():
 
 
 @st.cache_data
-def load_high_risk_geojson():
+def load_high_risk_geojson(version):
     """高风险掩膜 -> 矢量多边形 GeoJSON:
     rasterio.features.shapes 矢量化 -> buffer(±0.6像元) 合并近邻 ->
     simplify 去重 -> Chaikin 圆角细分使边界曲线化 -> 过滤面积 < 3 像元的碎斑。
@@ -117,8 +134,8 @@ def load_high_risk_geojson():
     from shapely.geometry import Polygon as _Poly
     from shapely.geometry import shape as _shape
 
-    risk_mask, _, _ = load_high_risk()
-    with rasterio.open(SSI_PATH) as _src:
+    risk_mask, _, _ = load_high_risk(version)
+    with rasterio.open(VERSIONS[version]["ssi"]) as _src:
         transform = _src.transform  # 与 SSI 同网格, 用于像元->经纬度
     pw = abs(transform.a)  # 像元边长 (度)
     geoms = [_shape(g) for g, val in shapes(risk_mask.astype(np.uint8), transform=transform)
@@ -173,9 +190,9 @@ def load_city_geojson():
 
 
 @st.cache_data
-def load_events():
+def load_events(version):
     """干旱事件表 (游程理论, 按真实时间版); 行/列 与 SSI 栅格同网格, 可精确匹配"""
-    df = pd.read_csv(EVENTS_CSV, encoding="utf-8-sig")
+    df = pd.read_csv(VERSIONS[version]["events"], encoding="utf-8-sig")
     df["行"] = df["行"].astype(int)
     df["列"] = df["列"].astype(int)
     return df
@@ -191,15 +208,15 @@ def norm_city(name):
 
 
 @st.cache_data
-def load_yield_stats():
-    """各市 SSI-产量关系统计 (city_yield_analysis.csv, 含规整 key 列)"""
-    return pd.read_csv(YIELD_STATS_CSV, encoding="utf-8-sig")
+def load_yield_stats(version):
+    """各市 SSI-产量关系统计 (city_yield_analysis_{版本}.csv, 含规整 key 列)"""
+    return pd.read_csv(VERSIONS[version]["yield_stats"], encoding="utf-8-sig")
 
 
 @st.cache_data
-def load_yield_series():
-    """各市逐年 产量距平 x 4-5月SSI (city_yield_ssi_timeseries.csv); 2025 年仅 SSI"""
-    return pd.read_csv(YIELD_SERIES_CSV, encoding="utf-8-sig")
+def load_yield_series(version):
+    """各市逐年 产量距平 x 4-5月SSI (city_yield_ssi_timeseries_{版本}.csv); 2025 年仅 SSI"""
+    return pd.read_csv(VERSIONS[version]["yield_series"], encoding="utf-8-sig")
 
 
 @st.cache_data
@@ -273,19 +290,19 @@ LAYER_STYLE = {
 
 # ---------------- 渲染函数 (缓存) ----------------
 @st.cache_data
-def render_layer_png(layer_key, band_idx=0):
+def render_layer_png(version, layer_key, band_idx=0):
     """图层 -> matplotlib PNG (data URI) + 数据范围。
     layer_key: "SSI" / 图层名 / 高风险预警名; 结果缓存, 同图层只渲染一次,
     切换月份/图层或点击地图的重跑直接复用, 免费版弱 CPU 下提速明显。"""
     if layer_key == "SSI":
-        arr = load_ssi()[0][band_idx]
+        arr = load_ssi(version)[0][band_idx]
         vmin, vmax, flip, cmap_name, interp = -2.0, 2.0, True, "RdYlBu_r", "bilinear"
     elif layer_key == HIGH_RISK:
-        risk_mask, risk_valid, _ = load_high_risk()
+        risk_mask, risk_valid, _ = load_high_risk(version)
         vmin = vmax = None
         interp = "nearest"
     else:
-        arr = load_layer(str(LAYER_PATHS[layer_key]))
+        arr = load_layer(str(VERSIONS[version]["layers"][layer_key]))
         cfg = LAYER_STYLE[layer_key]
         vmin, vmax = cfg["vmin"], cfg["vmax"]
         if vmin is None:  # Sen斜率: 用数据实际范围
@@ -361,15 +378,22 @@ def render_legend_png(is_risk, vmin, vmax, flip, cmap_name, ticks, label):
 st.set_page_config(page_title="河南土壤水分干旱监测平台", layout="wide")
 st.title("河南土壤水分干旱监测平台 (2016–2025, 4–5 月 SSI)")
 
-cube, bounds, transform = load_ssi()
-west, south, east, north = bounds
-
 # ---- 侧边栏 ----
 st.sidebar.header("图层控制")
+version = st.sidebar.radio(
+    "土壤水分版本",
+    ["浅层根区（0-28cm）", "表层（0-7cm）"],
+    index=0,  # 默认浅层根区: 分析得出的产量最优指标
+    help="浅层根区为 0-28cm 两层平均, 与冬小麦产量相关性最强; 表层为 0-7cm swvl1",
+)
+LAYER_PATHS = VERSIONS[version]["layers"]  # 当前版本的图层路径, 供各控件/渲染使用
 month = st.sidebar.select_slider(
     "月份 (数据含每年 4、5 月, 共 20 个月)",
     options=MONTHS, value=MONTHS[-1],
 )
+
+cube, bounds, transform = load_ssi(version)
+west, south, east, north = bounds
 HIGH_RISK = "未来高风险预警"
 layer_choice = st.sidebar.selectbox("显示图层", ["SSI"] + list(LAYER_PATHS.keys()) + [HIGH_RISK])
 LAYER_DESC = {
@@ -386,18 +410,18 @@ st.sidebar.caption(LAYER_DESC[layer_choice])
 band_idx = MONTHS.index(month)
 is_risk = layer_choice == HIGH_RISK
 if layer_choice == "SSI":
-    img_uri, vmin, vmax = render_layer_png("SSI", band_idx)  # flip: SSI 低=红(干旱), 高=蓝(湿润)
+    img_uri, vmin, vmax = render_layer_png(version, "SSI", band_idx)  # flip: SSI 低=红(干旱), 高=蓝(湿润)
     flip, cmap_name = True, "RdYlBu_r"
     label = "红=干旱 (SSI≤-1), 黄=正常, 蓝=湿润 (SSI>0)"
     ticks = [-2, -1, 0, 1, 2]
 elif is_risk:
-    risk_mask, risk_valid, risk_criteria = load_high_risk()
-    img_uri, _, _ = render_layer_png(HIGH_RISK)
+    risk_mask, risk_valid, risk_criteria = load_high_risk(version)
+    img_uri, _, _ = render_layer_png(version, HIGH_RISK)
     vmin = vmax = flip = cmap_name = None  # 风险图层无连续色带, 图例走分类分支
     ticks = ()
     label = "红色区域 = 未来持续变干高风险预警区 (静态图层, 不随月份变化)"
 else:
-    img_uri, vmin, vmax = render_layer_png(layer_choice)
+    img_uri, vmin, vmax = render_layer_png(version, layer_choice)
     st_cfg = LAYER_STYLE[layer_choice]
     if st_cfg["vmin"] is not None:  # Sen斜率 (None) 已在渲染函数内取数据实际范围
         vmin, vmax = st_cfg["vmin"], st_cfg["vmax"]
@@ -422,7 +446,7 @@ folium.raster_layers.ImageOverlay(
 ).add_to(m)
 if is_risk:  # 高风险连片区域: 矢量多边形 (栅格矢量化+平滑), 警示红填充 + 深红边界
     folium.GeoJson(
-        load_high_risk_geojson(),
+        load_high_risk_geojson(version),
         style_function=lambda f: {
             "fillColor": "#d23232",   # RGB [210, 50, 50] 警示红
             "fillOpacity": 0.75,
@@ -497,7 +521,7 @@ def _nearest_cities(mask):
 
 
 if is_risk:
-    risk_mask, risk_valid, risk_criteria = load_high_risk()
+    risk_mask, risk_valid, risk_criteria = load_high_risk(version)
     high_n = int(risk_mask.sum())
     risk_ratio = high_n / int(risk_valid.sum()) if risk_valid.any() else 0.0
     cities = _nearest_cities(risk_mask)
@@ -600,9 +624,9 @@ if st.session_state.get("click"):
         st.info("点击位置不在任何地级市界内, 无法匹配产量统计数据")
     else:
         key = norm_city(city)
-        _sr = load_yield_stats()
+        _sr = load_yield_stats(version)
         _sr = _sr[_sr["key"] == key]
-        _ser = load_yield_series()
+        _ser = load_yield_series(version)
         _ser = _ser[_ser["key"] == key].sort_values("年份")
         if _sr.empty or _ser.empty:
             st.info(f"{city} 暂无产量统计数据")
@@ -648,7 +672,7 @@ if st.session_state.get("click"):
                        "产量数据 2016-2024, SSI 2016-2025。若 SSI 低点常对应负距平柱, 则干旱减产成立。")
 
     # ---- 干旱事件列表 (游程理论, 按 行/列 精确匹配点击像元) ----
-    ev_px = load_events()
+    ev_px = load_events(version)
     ev_px = ev_px[(ev_px["行"] == cl["row"]) & (ev_px["列"] == cl["col"])]
     ev_px = ev_px.sort_values("起始月份")[["起始月份", "结束月份", "持续月数", "累积强度"]]
     st.markdown(f"**该位置干旱事件档案** (SSI ≤ -1.0, 共 {len(ev_px)} 次)")
