@@ -4,7 +4,8 @@
 逻辑与 yield_ssi_analysis.py 完全一致, 仅参数化为多数据集:
   1. 各市产量线性去趋势 -> 产量距平 / 减产率%
   2. 按 20 波段 SSI tif + 市边界提取每市每年 4-5 月 SSI 均值 (all_touched)
-  3. 每市 Pearson r / p 值; 干旱等级分组平均减产率 (轻 [-1.0,-0.5) 中 [-1.5,-1.0) 重 <=-1.5)
+  3. 每市 Pearson r / p 值; 旱涝双端分组平均减产率
+     (干旱端 轻[-1.0,-0.5) 中[-1.5,-1.0) 重<-1.5 | 偏湿端 轻[+0.5,+1.0) 中[+1.0,+1.5) 重>=+1.5)
 输出:
   产量关联分析\\city_yield_analysis_{swvl1,swvl2,swvl3,root}.csv  (含全省汇总行)
   产量关联分析\\层级产量关联对比表.csv  (四层汇总)
@@ -102,7 +103,10 @@ def analyze_one(tag, label, ssi_tif, yield_df):
 
     print(f"\n================ {label}: 各市 SSI x 产量距平 ================")
     rows = []
+    # 旱涝双端分组: 干旱端 (SSI 负) 与 偏湿端 (SSI 正), 完整刻画水分异常两端对产量的影响
     bins = {"轻度": (-1.0, -0.5), "中度": (-1.5, -1.0), "重度": (-np.inf, -1.5)}
+    wet_bins = {"轻度偏湿": (0.5, 1.0), "中度偏湿": (1.0, 1.5), "重度偏湿": (1.5, np.inf)}
+    all_bins = {**bins, **wet_bins}
     for key, g in mg.groupby("key"):
         city = g["城市"].iloc[0]
         g = g.dropna(subset=["SSI"])
@@ -111,21 +115,25 @@ def analyze_one(tag, label, ssi_tif, yield_df):
             print(f"{city:<6} [缺失] 有效配对样本 {n} 年")
             rows.append({"城市": city, "key": key, "有效年数": n, "Pearson_r": np.nan, "p值": np.nan,
                          "显著性(p<0.05)": "数据不足",
-                         **{f"{lvl}平均减产率%": np.nan for lvl in bins},
-                         **{f"{lvl}样本": 0 for lvl in bins}, "备注": "有效配对样本不足"})
+                         **{f"{lvl}平均减产率%": np.nan for lvl in all_bins},
+                         **{f"{lvl}样本": 0 for lvl in all_bins}, "备注": "有效配对样本不足"})
             continue
         r, p = stats.pearsonr(g["SSI"], g["距平"])
         grp = {}
-        for lvl, (lo, hi) in bins.items():
+        for lvl, (lo, hi) in all_bins.items():
             sub = g[(g["SSI"] >= lo) & (g["SSI"] < hi)]
             grp[lvl] = (sub["减产率%"].mean() if len(sub) else np.nan, len(sub))
-        print(f"{city:<6} r={r:+.3f}  p={p:.3f}{'*' if p < 0.05 else ''}  n={n}年  "
-              + "  ".join(f"{lvl}:{'—' if np.isnan(grp[lvl][0]) else format(grp[lvl][0], '+.1f')}%({grp[lvl][1]})"
-                          for lvl in bins))
+
+        def fmt_group(lv):
+            return f"{lv}:{'—' if np.isnan(grp[lv][0]) else format(grp[lv][0], '+.1f')}%({grp[lv][1]})"
+
+        print(f"{city:<6} r={r:+.3f}  p={p:.3f}{'*' if p < 0.05 else ''}  n={n}年")
+        print("        旱端 " + "  ".join(fmt_group(lvl) for lvl in bins)
+              + "   |   湿端 " + "  ".join(fmt_group(lvl) for lvl in wet_bins))
         rows.append({"城市": city, "key": key, "有效年数": n, "Pearson_r": r, "p值": p,
                      "显著性(p<0.05)": "显著" if p < 0.05 else "不显著",
-                     **{f"{lvl}平均减产率%": grp[lvl][0] for lvl in bins},
-                     **{f"{lvl}样本": grp[lvl][1] for lvl in bins},
+                     **{f"{lvl}平均减产率%": grp[lvl][0] for lvl in all_bins},
+                     **{f"{lvl}样本": grp[lvl][1] for lvl in all_bins},
                      "备注": "" if n == 9 else f"仅{n}年有效配对"})
 
     # 全省汇总 (全部市-年观测合并)
@@ -134,8 +142,14 @@ def analyze_one(tag, label, ssi_tif, yield_df):
     print(f"---- 全省汇总: n={len(g_all)}, r={r_all:+.3f}, p={p_all:.2e} ----")
     mod = g_all[(g_all.SSI >= -1.5) & (g_all.SSI < -1.0)]["减产率%"]
     sev = g_all[g_all.SSI < -1.5]["减产率%"]
-    print(f"  中度干旱: {'无样本' if not len(mod) else f'{mod.mean():+.1f}% (n={len(mod)})'}"
-          f" | 重度干旱: {'无样本' if not len(sev) else f'{sev.mean():+.1f}% (n={len(sev)})'}")
+    modw = g_all[(g_all.SSI >= 1.0) & (g_all.SSI < 1.5)]["减产率%"]
+    sevw = g_all[g_all.SSI >= 1.5]["减产率%"]
+
+    def _pct(s):
+        return "无样本" if not len(s) else f"{s.mean():+.1f}% (n={len(s)})"
+
+    print(f"  干旱端: 中度 {_pct(mod)} | 重度 {_pct(sev)}")
+    print(f"  偏湿端: 中度 {_pct(modw)} | 重度 {_pct(sevw)}")
     rows.append({"城市": "全省汇总", "key": "", "有效年数": len(g_all),
                  "Pearson_r": r_all, "p值": p_all,
                  "显著性(p<0.05)": "显著" if p_all < 0.05 else "不显著",
@@ -143,6 +157,10 @@ def analyze_one(tag, label, ssi_tif, yield_df):
                  "轻度样本": int(((g_all.SSI >= -1.0) & (g_all.SSI < -0.5)).sum()),
                  "中度平均减产率%": mod.mean() if len(mod) else np.nan, "中度样本": len(mod),
                  "重度平均减产率%": sev.mean() if len(sev) else np.nan, "重度样本": len(sev),
+                 "轻度偏湿平均减产率%": g_all[(g_all.SSI >= 0.5) & (g_all.SSI < 1.0)]["减产率%"].mean(),
+                 "轻度偏湿样本": int(((g_all.SSI >= 0.5) & (g_all.SSI < 1.0)).sum()),
+                 "中度偏湿平均减产率%": modw.mean() if len(modw) else np.nan, "中度偏湿样本": len(modw),
+                 "重度偏湿平均减产率%": sevw.mean() if len(sevw) else np.nan, "重度偏湿样本": len(sevw),
                  "备注": "全部市-年观测合并"})
 
     out = pd.DataFrame(rows)
@@ -152,7 +170,9 @@ def analyze_one(tag, label, ssi_tif, yield_df):
 
     return {"层级": label, "相关系数r": r_all, "p值": p_all,
             "中度干旱平均减产率%": mod.mean() if len(mod) else np.nan,
-            "重度干旱平均减产率%": sev.mean() if len(sev) else np.nan}
+            "重度干旱平均减产率%": sev.mean() if len(sev) else np.nan,
+            "中度偏湿平均减产率%": modw.mean() if len(modw) else np.nan,
+            "重度偏湿平均减产率%": sevw.mean() if len(sevw) else np.nan}
 
 
 def main():
@@ -173,10 +193,11 @@ def main():
     print("四套 SSI x 冬小麦产量关联: 汇总对比表 (全省汇总, 全部市-年观测)")
     print("=" * 72)
     for _, row in comp.iterrows():
-        mod = "无样本" if pd.isna(row["中度干旱平均减产率%"]) else f"{row['中度干旱平均减产率%']:+.1f}%"
-        sev = "无样本" if pd.isna(row["重度干旱平均减产率%"]) else f"{row['重度干旱平均减产率%']:+.1f}%"
+        def _cell(col):
+            return "无样本" if pd.isna(row[col]) else f"{row[col]:+.1f}%"
         print(f"  {row['层级']:<18} r={row['相关系数r']:+.3f}  p={row['p值']:.2e}  "
-              f"中度减产率: {mod:<10} 重度减产率: {sev}")
+              f"中度干旱: {_cell('中度干旱平均减产率%'):<10} 重度干旱: {_cell('重度干旱平均减产率%'):<10} "
+              f"中度偏湿: {_cell('中度偏湿平均减产率%'):<10} 重度偏湿: {_cell('重度偏湿平均减产率%')}")
     print(f"\n对比表已保存: {comp_path}")
     print(f"全部输出目录: {OUT_DIR}")
 

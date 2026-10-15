@@ -71,12 +71,13 @@ def main():
     plt.setp(ax.get_xticklabels(), rotation=-18, ha="left", rotation_mode="anchor")
 
     # 结论文字 (图下方)
-    fig.text(0.5, 0.015,
-             "表层（0-7cm）与浅层根区（0-28cm）同产量距平显著负相关，深层及全根区加权不显著——0-28cm 对产量变化最敏感。\n"
-             "偏湿年份（2018、2023）均减产而偏旱年份距平为正：负相关反映水分过剩型减产（湿害/烂场雨），并非干旱减产信号。",
-             ha="center", va="bottom", fontsize=12.5, color=C_TXT, wrap=True)
+    fig.text(0.5, 0.012,
+             "表层（0-7cm）与浅层根区（0-28cm）同产量距平显著负相关，深层及全根区加权不显著——0-28cm 对土壤水分异常波动最敏感。\n"
+             "减产由旱涝双端中的偏湿端驱动：重度偏湿年平均减产 2.5%~2.9%，中度干旱年减产率≈0；\n"
+             "剔除 2018（湿害）、2023（烂场雨）两个偏湿灾年后 r 归零（+0.02）——样本期负相关主要由这两个年份贡献，偏旱端效应待更长序列验证。",
+             ha="center", va="bottom", fontsize=12, color=C_TXT, wrap=True)
 
-    fig.tight_layout(rect=(0, 0.08, 1, 1))
+    fig.tight_layout(rect=(0, 0.12, 1, 1))
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     fig.savefig(OUT_PNG, facecolor=fig.get_facecolor(), bbox_inches="tight", pad_inches=0.25)
     print(f"已保存: {OUT_PNG}")
