@@ -593,8 +593,8 @@ try:
                    tickfont=dict(size=15, color=_txt_color), tickangle=-18),
     )
     st.plotly_chart(fig_corr, use_container_width=True)
-    st.caption("表层（0-7cm）和浅层根区（0-28cm）均与产量显著负相关，深层（28-100cm）及全根区加权均不显著。"
-               "说明冬小麦关键期干旱监测应聚焦 0-28cm，深层土壤水分对产量指示意义弱。")
+    st.caption("表层（0-7cm）与浅层根区（0-28cm）SSI 同产量距平显著负相关，深层（28-100cm）及全根区加权不显著：0-28cm 对产量变化最敏感。"
+               "样本期（2016-2024）偏湿年份（2018、2023）均减产而偏旱年份（2019、2020、2022）距平均为正——负相关反映偏湿型减产，而非干旱减产。")
 except Exception as exc:
     st.info(f"层位对比数据暂不可用（{exc}）")
 
@@ -641,7 +641,8 @@ if st.session_state.get("click"):
             mod_plus = float(np.average(_lv, weights=_wt)) if _lv else np.nan
             y1, y2, y3 = st.columns(3)
             y1.metric("SSI-产量相关系数 r", f"{r_v:+.2f}" if np.isfinite(r_v) else "—",
-                      help="产量距平 与 4-5月SSI 的 Pearson 相关; 负值 = 越干旱越减产")
+                      help="产量距平 与 4-5月SSI 的 Pearson 相关（SSI 低=旱、距平负=减产，干旱致减产应表现为 r>0）。"
+                           "样本期实测 r 多为负：偏湿年（2018、2023）均减产、偏旱年距平为正，负相关反映的是偏湿型减产而非干旱减产")
             y2.metric("显著性 p 值", (f"{p_v:.3f}" if np.isfinite(p_v) else "—")
                       + (" (显著)" if np.isfinite(p_v) and p_v < 0.05 else ""))
             y3.metric("中度以上干旱平均减产率",
@@ -668,8 +669,8 @@ if st.session_state.get("click"):
                 legend=dict(orientation="h", yanchor="bottom", y=1.02),
             )
             st.plotly_chart(fig_y, use_container_width=True)
-            st.caption("柱=产量距平 (左轴, 负值=减产), 线=4-5月SSI (右轴, 越低越旱); "
-                       "产量数据 2016-2024, SSI 2016-2025。若 SSI 低点常对应负距平柱, 则干旱减产成立。")
+            st.caption("柱=产量距平 (左轴, 负值=减产), 线=4-5月SSI (右轴, 越低越旱); 产量数据 2016-2024, SSI 2016-2025。"
+                       "样本期内减产年多为 4-5 月偏湿（SSI 高点）年份（如 2023 烂场雨、2018 霜冻），偏旱年份距平均为正。")
 
     # ---- 干旱事件列表 (游程理论, 按 行/列 精确匹配点击像元) ----
     ev_px = load_events(version)
