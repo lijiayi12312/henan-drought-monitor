@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-河南土壤水分干旱监测平台 (Streamlit)
-数据: 河南省 4-5 月 SSI (2016-04 ~ 2025-05, 每年 4/5 月共 20 个波段)
-功能:
-  Tab1 空间监测地图 - 多图层叠加 (多选+透明度控制) / 月份时间轴 / 点击像元查询
-  Tab2 旱涝属性数据库 - 市-年面板数据 (排序/筛选/下载), 各市汇总统计
-运行:  python -m streamlit run app.py  (本地需设 PYTHONPATH=C:\\pylibs; 云端由 requirements.txt 提供依赖)
-依赖:  见 requirements.txt
+中原农情旱涝双端风险研判与空间态势感知系统 —— 网格卡片式数据门户 (浅色主题)
+第 4 阶段: 精细化打磨
+  Tab1 - 地图下方 2行3列 共 6 张数据产品卡片 (height=200 统一高度), 点击切换主地图:
+         现状旱涝状态 / 历史偏干频率 / 历史偏湿频率 / MK趋势变干 / MK趋势变湿 / Hurst持续性
+         高风险图层旱涝分离: Sen<0&Hurst>0.5=深红(未来干旱风险), Sen>0&Hurst>0.5=深蓝(未来渍害风险)
+         图例悬浮于地图右上角; 点击城市 -> 综合研判框 (左数据 + 右动态研判文字)
+  Tab2 - 2行3列 共 6 张核心数据集卡片 (统一高度), HTML 淡蓝表头表格 + 翻页
+运行:  python -m streamlit run app_portal.py --global.developmentMode false --server.port 8502
 """
 import base64
 import io
@@ -14,15 +15,14 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import rasterio
 
-# 本机手动装在 C:\pylibs 的第三方库 (Windows); 云端/Linux 由 requirements.txt 提供, 自动跳过
 _pylibs = Path(r"C:\pylibs")
 if _pylibs.exists():
     sys.path.append(str(_pylibs))
 
 import folium
-import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from streamlit_folium import st_folium
@@ -32,12 +32,11 @@ matplotlib.use("Agg")
 from matplotlib import cm as mpl_cm
 from matplotlib import pyplot as plt
 from matplotlib import colors as mpl_colors
-
-# matplotlib 默认 DejaVu Sans 无中文字形 (图例中文会渲染成方框)
-# 优先注册随仓库分发的 Noto Sans CJK (Windows/Linux/云端通用), 保证部署后中文一致显示
+from matplotlib import patches as mpl_patches
 import matplotlib.font_manager as fm
 
-_FONT_FILE = Path(__file__).resolve().parent / "assets" / "NotoSansCJKsc-Regular.otf"
+_ROOT = Path(__file__).resolve().parent
+_FONT_FILE = _ROOT / "assets" / "NotoSansCJKsc-Regular.otf"
 if _FONT_FILE.exists():
     fm.fontManager.addfont(str(_FONT_FILE))
     _CJK = fm.FontProperties(fname=str(_FONT_FILE)).get_name()
@@ -46,40 +45,56 @@ else:
     matplotlib.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
 matplotlib.rcParams["axes.unicode_minus"] = False
 
-# ---------------- 数据路径 (按土壤水分版本组织) ----------------
-# app.py 所在目录, 本地 (Windows) 与 Streamlit Cloud (Linux) 通用
-ROOT = Path(__file__).resolve().parent
+# ---------------- 数据路径 ----------------
+ROOT = _ROOT
 CITY_SHP = ROOT / "河南省市shp" / "河南省.shp"
 MONTHS = [f"{y}-{m:02d}" for y in range(2016, 2026) for m in (4, 5)]  # 20 个波段
-
-# 每个版本一套完整的输入: 多波段 SSI / 五项分析图层 / 游程事件 / 产量统计与时序
 VERSIONS = {
     "浅层根区（0-28cm）": {
         "ssi": ROOT / "4-5月河南SSI" / "4-5月河南SSI_shallow_2016-2025.tif",
-        "layers": {
-            "干旱频率": ROOT / "干旱频率" / "河南浅层SSI_4-5月_干旱频率_2016-2025.tif",
-            "MK Z值": ROOT / "Mann-Kendall 趋势检验" / "河南浅层SSI_4-5月_MK_Z值_2016-2025.tif",
-            "Sen斜率": ROOT / "Mann-Kendall 趋势检验" / "河南浅层SSI_4-5月_MK_Sen斜率_2016-2025.tif",
-            "Hurst指数": ROOT / "hurst指数" / "河南浅层SSI_4-5月_Hurst指数_2016-2025.tif",
-        },
-        "events": ROOT / "游程理论" / "河南浅层SSI_4-5月_干旱事件_按真实时间_2016-2025.csv",
-        "yield_stats": ROOT / "产量关联分析" / "city_yield_analysis_shallow.csv",
+        "sen": ROOT / "Mann-Kendall 趋势检验" / "河南浅层SSI_4-5月_MK_Sen斜率_2016-2025.tif",
+        "hurst": ROOT / "hurst指数" / "河南浅层SSI_4-5月_Hurst指数_2016-2025.tif",
         "yield_series": ROOT / "产量关联分析" / "city_yield_ssi_timeseries_shallow.csv",
     },
     "表层（0-7cm）": {
         "ssi": ROOT / "4-5月河南SSI" / "4-5月河南SSI_swvl1_2016-2025.tif",
-        "layers": {
-            "干旱频率": ROOT / "干旱频率" / "河南SSI_4-5月_干旱频率_2016-2025.tif",
-            "MK Z值": ROOT / "Mann-Kendall 趋势检验" / "河南SSI_4-5月_MK_Z值_2016-2025.tif",
-            "Sen斜率": ROOT / "Mann-Kendall 趋势检验" / "河南SSI_4-5月_MK_Sen斜率_2016-2025.tif",
-            "Hurst指数": ROOT / "hurst指数" / "河南SSI_4-5月_Hurst指数_2016-2025.tif",
-        },
-        "events": ROOT / "游程理论" / "河南SSI_4-5月_干旱事件_按真实时间_2016-2025.csv",
-        "yield_stats": ROOT / "city_yield_analysis.csv",
+        "sen": ROOT / "Mann-Kendall 趋势检验" / "河南SSI_4-5月_MK_Sen斜率_2016-2025.tif",
+        "hurst": ROOT / "hurst指数" / "河南SSI_4-5月_Hurst指数_2016-2025.tif",
         "yield_series": ROOT / "city_yield_ssi_timeseries.csv",
     },
 }
-LAYER_CORR_CSV = ROOT / "产量关联分析" / "层级产量关联对比表.csv"  # 五层 SSI-产量相关系数 (跨版本, 不随切换变)
+
+# 地图数据产品阵列 (2行3列, 点击切换主地图)
+PRODUCTS = [
+    {"key": "ssi", "icon": "🗺️", "name": "现状旱涝状态", "sub": "当月 SSI 距平分级"},
+    {"key": "freq_dry", "icon": "🌵", "name": "历史偏干频率", "sub": "SSI<0 月份占比"},
+    {"key": "freq_wet", "icon": "🌧️", "name": "历史偏湿频率", "sub": "SSI>0 月份占比"},
+    {"key": "trend_dry", "icon": "🔴", "name": "未来干旱高风险区", "sub": "Sen<-0.15 且 Hurst>0.5 · 仅展示高风险区域"},
+    {"key": "trend_wet", "icon": "🔵", "name": "未来渍害高风险区", "sub": "Sen>0.02 且 Hurst>0.5 · 仅展示高风险区域"},
+    {"key": "hurst", "icon": "🔁", "name": "Hurst 持续性", "sub": "趋势持续性指数"},
+]
+
+# Tab2 核心数据集卡片 (2行3列)
+DATASETS = [
+    {"icon": "🌾", "title": "冬小麦产量面板（浅层根区）",
+     "desc": "18 市 × 10 年 4-5 月浅层根区 SSI × 实际产量 / 趋势产量 / 距平 / 减产率，主分析数据集。",
+     "path": ROOT / "产量关联分析" / "city_yield_ssi_timeseries_shallow.csv"},
+    {"icon": "🌱", "title": "冬小麦产量面板（表层）",
+     "desc": "同上面板结构的表层 swvl1 (0-7cm) 版本，供层位间对比验证。",
+     "path": ROOT / "city_yield_ssi_timeseries.csv"},
+    {"icon": "🌀", "title": "旱涝事件回溯库（游程理论）",
+     "desc": "2016-2025 年 4-5 月逐像元干旱事件档案：起止月份、持续月数、累积强度。",
+     "path": ROOT / "游程理论" / "河南浅层SSI_4-5月_干旱事件_按真实时间_2016-2025.csv"},
+    {"icon": "📊", "title": "各市 SSI-产量关系统计（浅层）",
+     "desc": "各市 Pearson r / p 值与轻中重度旱涝分级减产率汇总（浅层根区）。",
+     "path": ROOT / "产量关联分析" / "city_yield_analysis_shallow.csv"},
+    {"icon": "📈", "title": "各市 SSI-产量关系统计（表层）",
+     "desc": "各市 Pearson r / p 值与分级减产率汇总（表层 swvl1）。",
+     "path": ROOT / "city_yield_analysis.csv"},
+    {"icon": "🗂️", "title": "五层 SSI × 产量相关对比表",
+     "desc": "swvl1/swvl2/浅层根区/swvl3/全根区加权 五层相关系数与旱涝双端分级减产率。",
+     "path": ROOT / "产量关联分析" / "层级产量关联对比表.csv"},
+]
 
 
 # ---------------- 数据加载 (缓存) ----------------
@@ -87,140 +102,31 @@ LAYER_CORR_CSV = ROOT / "产量关联分析" / "层级产量关联对比表.csv"
 def load_ssi(version):
     with rasterio.open(VERSIONS[version]["ssi"]) as src:
         cube = src.read().astype(np.float64)
-        nodata = src.nodata
-        cube[cube <= nodata] = np.nan
+        cube[cube <= src.nodata] = np.nan
         transform = src.transform
-        h, w = cube.shape[1], cube.shape[2]
-    bounds = [transform.c, transform.f + h * transform.e,
-              transform.c + w * transform.a, transform.f]  # [w, s, e, n]
+    bounds = [transform.c, transform.f + cube.shape[1] * transform.e,
+              transform.c + cube.shape[2] * transform.a, transform.f]
     return cube, bounds, transform
 
 
 @st.cache_data
-def load_layer(path_str):
+def load_array(path_str):
+    """单波段分析图层 -> (数组, bounds); nodata -> NaN"""
     with rasterio.open(path_str) as src:
         arr = src.read(1).astype(np.float64)
-        nodata = src.nodata
-        arr[arr <= nodata / 2] = np.nan
-    return arr
-
-
-@st.cache_data
-def load_high_risk(version):
-    """未来高风险预警像元:
-    判据: Sen斜率 <= 全省最负 20% 分位 (变干最快的前两成像元) 且 Hurst > 0.5 (趋势持续)
-    返回 (风险掩膜, 有效掩膜, 判据说明文字)"""
-    layers = VERSIONS[version]["layers"]
-    s = load_layer(str(layers["Sen斜率"]))
-    h = load_layer(str(layers["Hurst指数"]))
-    valid = np.isfinite(s) & np.isfinite(h)
-    q20 = float(np.quantile(s[valid], 0.2))  # Sen 斜率最负的前 20% 分位
-    risk = (s <= q20) & (h > 0.5)
-    return risk, valid, f"Sen斜率 ≤ 最负20%分位 ({q20:.3f}) 且 Hurst > 0.5"
-
-
-@st.cache_data
-def load_high_risk_geojson(version):
-    """高风险掩膜 -> 矢量多边形 GeoJSON:
-    rasterio.features.shapes 矢量化 -> buffer(±0.6像元) 合并近邻 ->
-    simplify 去重 -> Chaikin 圆角细分使边界曲线化 -> 过滤面积 < 3 像元的碎斑。
-    返回 GeoJSON dict (EPSG:4326)"""
-    import json as _json
-
-    import geopandas as gpd
-    from rasterio.features import shapes
-    from shapely.geometry import MultiPolygon as _MP
-    from shapely.geometry import Polygon as _Poly
-    from shapely.geometry import shape as _shape
-
-    risk_mask, _, _ = load_high_risk(version)
-    with rasterio.open(VERSIONS[version]["ssi"]) as _src:
-        transform = _src.transform  # 与 SSI 同网格, 用于像元->经纬度
-    pw = abs(transform.a)  # 像元边长 (度)
-    geoms = [_shape(g) for g, val in shapes(risk_mask.astype(np.uint8), transform=transform)
-             if val == 1]
-
-    def chaikin_ring(coords, n=3):
-        """Chaikin 切角细分: 每轮把每段在 1/4 与 3/4 处取两点, 使折线变为平滑曲线"""
-        pts = np.asarray(coords)
-        for _ in range(n):
-            new = [pts[0]]
-            for i in range(len(pts) - 1):
-                p, q = pts[i], pts[i + 1]
-                new.append(0.75 * p + 0.25 * q)
-                new.append(0.25 * p + 0.75 * q)
-            new.append(pts[-1])
-            pts = np.asarray(new)
-        return pts
-
-    def chaikin_poly(poly, n=3):
-        ext = chaikin_ring(poly.exterior.coords, n)
-        holes = [chaikin_ring(r.coords, n) for r in poly.interiors]
-        return _Poly(ext, holes)
-
-    def smooth_geom(geom, n=3):
-        if geom.geom_type == "Polygon":
-            return chaikin_poly(geom, n)
-        if geom.geom_type == "MultiPolygon":
-            return _MP([chaikin_poly(g, n) for g in geom.geoms])
-        return geom
-
-    buf = 0.6 * pw  # buffer 幅度 (像元): 合并近邻、削平粗锯齿
-    try:  # join_style=2 (mitre); 老版本 shapely 无此参数则回退默认
-        base = [g.buffer(buf, join_style=2).buffer(-buf, join_style=2).simplify(pw * 0.1)
-                for g in geoms]
-    except TypeError:
-        base = [g.buffer(buf).buffer(-buf).simplify(pw * 0.1) for g in geoms]
-    polys = [smooth_geom(g, 3) for g in base if not g.is_empty and g.area >= 3 * pw * pw]
-    gdf = gpd.GeoDataFrame(geometry=polys, crs=4326)
-    return _json.loads(gdf.to_json())
-
-
-@st.cache_data
-def load_city_geojson():
-    """地级市边界 -> GeoJSON dict (EPSG:4326)"""
-    import geopandas as gpd
-    import json as _json
-
-    gdf = gpd.read_file(CITY_SHP, encoding="utf-8")
-    if gdf.crs and gdf.crs.to_epsg() != 4326:
-        gdf = gdf.to_crs(4326)
-    return _json.loads(gdf[["name", "geometry"]].to_json())
-
-
-@st.cache_data
-def load_events(version):
-    """干旱事件表 (游程理论, 按真实时间版); 行/列 与 SSI 栅格同网格, 可精确匹配"""
-    df = pd.read_csv(VERSIONS[version]["events"], encoding="utf-8-sig")
-    df["行"] = df["行"].astype(int)
-    df["列"] = df["列"].astype(int)
-    return df
-
-
-def norm_city(name):
-    """城市名规整: 去"示范区"/"市"后缀, 对齐 shp 与产量统计表 (济源市/济源示范区 -> 济源)"""
-    n = str(name).strip()
-    for suf in ("示范区", "市"):
-        if n.endswith(suf) and len(n) > len(suf):
-            return n[: -len(suf)]
-    return n
-
-
-@st.cache_data
-def load_yield_stats(version):
-    """各市 SSI-产量关系统计 (city_yield_analysis_{版本}.csv, 含规整 key 列)"""
-    return pd.read_csv(VERSIONS[version]["yield_stats"], encoding="utf-8-sig")
+        arr[arr <= src.nodata / 2] = np.nan
+        t = src.transform
+    bounds = [t.c, t.f + arr.shape[0] * t.e, t.c + arr.shape[1] * t.a, t.f]
+    return arr, bounds
 
 
 @st.cache_data
 def load_yield_series(version):
-    """各市逐年 产量距平 x 4-5月SSI (city_yield_ssi_timeseries_{版本}.csv); 2025 年仅 SSI"""
     return pd.read_csv(VERSIONS[version]["yield_series"], encoding="utf-8-sig")
 
 
 @st.cache_data
 def load_city_gdf():
-    """地级市边界 GeoDataFrame (EPSG:4326), 供 点击坐标->所属城市 空间匹配"""
     import geopandas as gpd
 
     gdf = gpd.read_file(CITY_SHP, encoding="utf-8")
@@ -230,13 +136,32 @@ def load_city_gdf():
 
 
 @st.cache_data
-def load_layer_corr():
-    """五层 SSI-产量相关系数对比表 (层级/相关系数r/p值/分级减产率)"""
-    return pd.read_csv(LAYER_CORR_CSV, encoding="utf-8-sig")
+def load_city_geojson():
+    import json as _json
+    return _json.loads(load_city_gdf().to_json())
+
+
+@st.cache_data
+def load_city_labels():
+    pts = load_city_gdf().geometry.representative_point()
+    return [(str(n), (p.y, p.x)) for n, p in zip(load_city_gdf()["name"], pts)]
+
+
+@st.cache_data
+def load_city_bounds():
+    w, s, e, n = load_city_gdf().total_bounds
+    return float(s), float(w), float(n), float(e)
+
+
+def norm_city(name):
+    n = str(name).strip()
+    for suf in ("示范区", "市"):
+        if n.endswith(suf) and len(n) > len(suf):
+            return n[: -len(suf)]
+    return n
 
 
 def find_city_name(lon, lat):
-    """点击坐标 -> 所属地级市名; 不在任何市界内时返回 None"""
     from shapely.geometry import Point
 
     gdf = load_city_gdf()
@@ -244,500 +169,730 @@ def find_city_name(lon, lat):
     return str(hit.iloc[0]["name"]) if len(hit) else None
 
 
+def city_mean_ssi(city, cube, transform, band_idx):
+    """该市边界内当前波段 SSI 均值 (all_touched 掩膜)"""
+    from rasterio.features import geometry_mask
+
+    gdf = load_city_gdf()
+    row = gdf[gdf["name"] == city]
+    if row.empty:
+        return np.nan
+    h, w = cube.shape[1], cube.shape[2]
+    mask = geometry_mask(list(row.geometry), out_shape=(h, w), transform=transform,
+                         invert=True, all_touched=True)
+    vals = cube[band_idx][mask]
+    vals = vals[np.isfinite(vals)]
+    return float(vals.mean()) if vals.size else np.nan
+
+
 @st.cache_data
-def load_city_labels():
-    """地级市名称及其代表点坐标 (EPSG:4326), 用于地图上的河南省内城市标注"""
-    import geopandas as gpd
+def city_ssi_all(version, band_idx):
+    """全部 18 市在当前波段的 SSI 均值 {城市名: 值}, 供极值城市 Top3 图"""
+    from rasterio.features import geometry_mask
 
-    gdf = gpd.read_file(CITY_SHP, encoding="utf-8")
-    if gdf.crs and gdf.crs.to_epsg() != 4326:
-        gdf = gdf.to_crs(4326)
-    pts = gdf.geometry.representative_point()
-    return [(str(n), (p.y, p.x)) for n, p in zip(gdf["name"], pts)]
-
-
-@st.cache_data
-def load_city_bounds():
-    """河南省城市边界的外包框 (EPSG:4326), 用于地图 fit_bounds"""
-    import geopandas as gpd
-
-    gdf = gpd.read_file(CITY_SHP, encoding="utf-8")
-    if gdf.crs and gdf.crs.to_epsg() != 4326:
-        gdf = gdf.to_crs(4326)
-    w, s, e, n = gdf.total_bounds
-    return float(s), float(w), float(n), float(e)
+    cube, _, transform = load_ssi(version)
+    gdf = load_city_gdf()
+    h, w = cube.shape[1], cube.shape[2]
+    out = {}
+    for _, r in gdf.iterrows():
+        mask = geometry_mask([r.geometry], out_shape=(h, w), transform=transform,
+                             invert=True, all_touched=True)
+        vals = cube[band_idx][mask]
+        vals = vals[np.isfinite(vals)]
+        out[str(r["name"])] = float(vals.mean()) if vals.size else np.nan
+    return out
 
 
-# ---------------- 图层样式配置 (专业制图配色) ----------------
-# cmap 为 matplotlib 色带名; flip=True 时地图取 cmap(1-t) (使低值=色带高端颜色)
-# Sen斜率的 vmin/vmax/ticks 为 None -> 运行时取数据实际最小/最大值
-LAYER_STYLE = {
-    "干旱频率": {"vmin": 0.0, "vmax": 1.0, "cmap": "YlOrRd", "flip": False,
-               "ticks": [0, 0.25, 0.5, 0.75, 1],
-               "label": "浅黄=低频, 深红=高频干旱区"},
-    "MK Z值": {"vmin": -2.0, "vmax": 2.0, "cmap": "RdBu", "flip": False,
-              "ticks": [-2, -1, 0, 1, 2],
-              "label": "红=变干趋势 (Z<0), 蓝=变湿趋势 (Z>0)"},
-    "Sen斜率": {"vmin": None, "vmax": None, "cmap": "RdYlGn", "flip": False,
-              "ticks": None,
-              "label": "红=负斜率 (变干), 绿=正斜率 (变湿)"},
-    "Hurst指数": {"vmin": 0.0, "vmax": 1.0, "cmap": "PuOr", "flip": True,
-               "ticks": [0, 0.25, 0.5, 0.75, 1],
-               "label": "紫=趋势反转 (H<0.5), 橙=趋势持续 (H>0.5)"},
-}
+def stress_level(ssi):
+    """SSI -> (等级名, 颜色); 红=偏干, 蓝=偏湿 (全系统统一: 红=干旱风险, 蓝=渍害风险)"""
+    if not np.isfinite(ssi):
+        return "无数据", "#9aa3af"
+    for lo, hi, name, color in [
+        (-99, -2.0, "极端偏干", "#67000d"), (-2.0, -1.0, "重度偏干", "#cb181d"),
+        (-1.0, -0.5, "轻度偏干", "#fb6a4a"), (-0.5, 0.5, "正常", "#41ab5d"),
+        (0.5, 1.0, "轻度偏湿", "#6baed6"), (1.0, 1.5, "中度偏湿", "#2171b5"),
+        (1.5, 2.0, "重度偏湿", "#08519c"), (2.0, 99, "极端偏湿", "#08306b"),
+    ]:
+        if lo <= ssi < hi:
+            return name, color
+    return "正常", "#41ab5d"
 
 
-# ---------------- 渲染函数 (缓存) ----------------
-@st.cache_data
-def render_layer_png(version, layer_key, band_idx=0):
-    """图层 -> matplotlib PNG (data URI) + 数据范围。
-    layer_key: "SSI" / 图层名 / 高风险预警名; 结果缓存, 同图层只渲染一次,
-    切换月份/图层或点击地图的重跑直接复用, 免费版弱 CPU 下提速明显。"""
-    if layer_key == "SSI":
-        arr = load_ssi(version)[0][band_idx]
-        # flip=False: cmap(t) 直接取值 -> SSI 低(偏干)=蓝, SSI 高(偏湿)=红
-        vmin, vmax, flip, cmap_name, interp = -2.0, 2.0, False, "RdYlBu_r", "bilinear"
-    elif layer_key == HIGH_RISK:
-        risk_mask, risk_valid, _ = load_high_risk(version)
-        vmin = vmax = None
-        interp = "nearest"
-    else:
-        arr = load_layer(str(VERSIONS[version]["layers"][layer_key]))
-        cfg = LAYER_STYLE[layer_key]
-        vmin, vmax = cfg["vmin"], cfg["vmax"]
-        if vmin is None:  # Sen斜率: 用数据实际范围
-            vmin, vmax = float(np.nanmin(arr)), float(np.nanmax(arr))
-        flip, cmap_name, interp = cfg["flip"], cfg["cmap"], "bilinear"
+# ---------------- 栅格渲染 (缓存) ----------------
+def _rgba_of(arr, vmin, vmax, cmap_name, flip=False):
+    t = np.clip((arr - vmin) / (vmax - vmin), 0, 1)
+    rgba = plt.get_cmap(cmap_name)(1.0 - t if flip else t)
+    rgba[~np.isfinite(arr)] = 0.0
+    return rgba
 
-    # 生成 RGBA: 风险图层只渲染非风险淡灰轮廓 (高风险区改用矢量多边形), 其余为连续渐变
-    if layer_key == HIGH_RISK:
-        rgba = np.zeros((*risk_mask.shape, 4))
-        rgba[risk_valid] = (0.93, 0.93, 0.93, 0.95)  # 非风险有效区: 极淡灰显示省域轮廓
-        grid = risk_mask.shape
-        print(f"=== 图层调试 [{HIGH_RISK}] 高风险像元={int(risk_mask.sum())} / {int(risk_valid.sum())} (矢量多边形渲染) ===")
-    else:
-        # 归一化到 [0,1], 按图层色带取色 (flip 时用 1-t 使低值=色带高端)
-        cmap = plt.get_cmap(cmap_name)
-        t = np.clip((arr - vmin) / (vmax - vmin), 0, 1)
-        rgba = cmap(1.0 - t if flip else t)  # (rows, cols, 4) float 0~1
-        rgba[~np.isfinite(arr)] = 0.0  # NoData 完全透明
-        grid = arr.shape
-        print(f"=== 图层调试 [{layer_key}] cmap={cmap_name} vmin={vmin:.3g} vmax={vmax:.3g} flip={flip} 有效像元={int(np.isfinite(arr).sum())} ===")
 
-    # matplotlib 渲染为 PNG (bilinear 插值形成连续面), 转 base64 data URI
-    fig = plt.figure(figsize=(grid[1] / 10, grid[0] / 10), dpi=100)
+def _fig_to_uri(rgba, cell_px=10, dpi=100):
+    h, w = rgba.shape[0], rgba.shape[1]
+    fig = plt.figure(figsize=(w / cell_px, h / cell_px), dpi=dpi)
     ax = fig.add_axes([0, 0, 1, 1])
     ax.axis("off")
-    ax.imshow(rgba, interpolation=interp)  # 行序北在上, origin 默认 upper 即正确
+    ax.imshow(rgba, interpolation="bilinear")
     buf = io.BytesIO()
     fig.savefig(buf, format="png", transparent=True)
     plt.close(fig)
-    img_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
-    return img_uri, vmin, vmax
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
 @st.cache_data
-def render_legend_png(is_risk, vmin, vmax, flip, cmap_name, ticks, label):
-    """图例 -> PNG bytes (缓存); ticks 需传 tuple (可哈希)。"""
-    from matplotlib.patches import FancyBboxPatch, Patch
+def render_product_png(version, product_key, band_idx):
+    """主地图图层 -> (PNG data URI, bounds)
+    trend_dry: 仅展示高风险区 Sen<-0.15&Hurst>0.5=深红(未来干旱风险), 其余像元极浅灰
+    trend_wet: 仅展示高风险区 Sen>0.02&Hurst>0.5=深蓝(未来渍害风险), 其余像元极浅灰
+    freq_dry/freq_wet: 由 SSI 立方体统计 10 年 20 期中 SSI<0 / >0 的占比"""
+    if product_key == "ssi":
+        cube, bounds, _ = load_ssi(version)
+        rgba = _rgba_of(cube[band_idx], -2.0, 2.0, "RdYlBu")  # 红=偏干, 蓝=偏湿
+    elif product_key in ("freq_dry", "freq_wet"):
+        cube, bounds, _ = load_ssi(version)
+        fin = np.isfinite(cube)
+        n_valid = fin.sum(axis=0).astype(np.float64)
+        n_valid[n_valid == 0] = np.nan
+        if product_key == "freq_dry":
+            freq = ((cube < 0) & fin).sum(axis=0) / n_valid
+            rgba = _rgba_of(freq, 0.0, 1.0, "YlOrRd")
+        else:
+            freq = ((cube > 0) & fin).sum(axis=0) / n_valid
+            rgba = _rgba_of(freq, 0.0, 1.0, "YlGnBu")
+    elif product_key in ("trend_dry", "trend_wet"):
+        sen, bounds = load_array(str(VERSIONS[version]["sen"]))
+        hur, _ = load_array(str(VERSIONS[version]["hurst"]))
+        valid = np.isfinite(sen) & np.isfinite(hur)
+        persist = valid & (hur > 0.5)
+        rgba = np.zeros((*sen.shape, 4))
+        rgba[valid] = (0.55, 0.60, 0.66, 0.15)  # 背景像元: 极浅灰
+        if product_key == "trend_dry":
+            rgba[persist & (sen < -0.15)] = (0.70, 0.09, 0.17, 0.95)      # 深红=未来干旱高风险
+        else:
+            rgba[persist & (sen > 0.02)] = (0.13, 0.40, 0.67, 0.95)       # 深蓝=未来渍害高风险
+    else:  # hurst
+        arr, bounds = load_array(str(VERSIONS[version]["hurst"]))
+        rgba = _rgba_of(arr, 0.0, 1.0, "PuOr", flip=True)
+    return _fig_to_uri(rgba), bounds
 
-    fig = plt.figure(figsize=(6, 0.75), dpi=130)
-    fig.patch.set_alpha(0.0)
-    if is_risk:
-        ax = fig.add_axes([0.06, 0.30, 0.88, 0.40])
-        ax.patch.set_alpha(0.0)
+
+@st.cache_data
+def render_thumb_uri(version, product_key, band_idx):
+    return render_product_png(version, product_key, band_idx)[0]
+
+
+@st.cache_data
+def render_legend_png(version, product_key):
+    """地图右上角悬浮图例 (紧凑版); 返回 PNG bytes"""
+    swatches = {
+        "trend_dry": [((0.70, 0.09, 0.17), "未来干旱风险 (Sen<-0.15 且 Hurst>0.5)"),
+                      ((0.55, 0.60, 0.66), "其他区域 · 仅展示高风险区")],
+        "trend_wet": [((0.13, 0.40, 0.67), "未来渍害风险 (Sen>0.02 且 Hurst>0.5)"),
+                      ((0.55, 0.60, 0.66), "其他区域 · 仅展示高风险区")],
+    }
+    bars = {
+        "ssi": (-2.0, 2.0, "RdYlBu", False, (-2, 0, 2), "红=偏干 · 蓝=偏湿"),
+        "freq_dry": (0.0, 1.0, "YlOrRd", False, (0, 0.5, 1), "偏干频率 (SSI<0 占比)"),
+        "freq_wet": (0.0, 1.0, "YlGnBu", False, (0, 0.5, 1), "偏湿频率 (SSI>0 占比)"),
+        "hurst": (0.0, 1.0, "PuOr", True, (0, 0.5, 1), "Hurst 指数 (>0.5 趋势持续)"),
+    }
+    if product_key in swatches:
+        # 图幅加宽加高, 防止标签被裁切 (配合 savefig tight)
+        fig = plt.figure(figsize=(3.4, 1.05), dpi=150)
+        fig.patch.set_alpha(0.0)
+        ax = fig.add_axes([0, 0, 1, 1])
         ax.axis("off")
-        handles = [Patch(facecolor=(210 / 255, 50 / 255, 50 / 255, 0.75), edgecolor="#961414",
-                         linewidth=1.2, label="高风险区（红色）"),
-                   Patch(facecolor="#ededed", edgecolor="#c8c8c8", linewidth=0.6, label="非风险区（灰色）")]
-        ax.legend(handles=handles, loc="center", ncol=2, frameon=False, fontsize=9)
-        ax.set_title(label, fontsize=9, color="#444444", pad=2)
+        for i, (color, label) in enumerate(swatches[product_key]):
+            y = 0.58 - i * 0.46
+            ax.add_patch(mpl_patches.Rectangle((0.02, y), 0.06, 0.30, color=color))
+            ax.text(0.10, y + 0.15, label, fontsize=8.5, va="center")
     else:
-        ax = fig.add_axes([0.06, 0.40, 0.88, 0.30])  # 内边距: 四周留白
+        vmin, vmax, cmap_name, flip, ticks, label = bars[product_key]
+        # 加高图幅, 给 colorbar 下方的 xlabel (如 红=偏干 · 蓝=偏湿) 留足空间
+        fig = plt.figure(figsize=(2.6, 1.0), dpi=150)
+        fig.patch.set_alpha(0.0)
+        ax = fig.add_axes([0.04, 0.42, 0.92, 0.28])
         ax.patch.set_alpha(0.0)
         norm = mpl_colors.Normalize(vmin=vmin, vmax=vmax)
-        # colorbar 用 cmap(t) 取值; 地图 flip 时用 cmap(1-t), 因此图例色带需取反
-        bar_cmap = plt.get_cmap(cmap_name).reversed() if flip else plt.get_cmap(cmap_name)
-        fig.colorbar(mpl_cm.ScalarMappable(norm=norm, cmap=bar_cmap),
-                     cax=ax, orientation="horizontal", ticks=list(ticks))
-        ax.set_xlabel(label, fontsize=9)
-        ax.tick_params(labelsize=9, length=2)
-    # 圆角矩形底板
-    card = FancyBboxPatch((0.015, 0.06), 0.97, 0.88,
-                          boxstyle="round,pad=0.012,rounding_size=0.06",
-                          transform=fig.transFigure, facecolor="white",
-                          edgecolor="#e3e3e3", linewidth=0.8, zorder=-10)
-    fig.add_artist(card)
+        cmap = plt.get_cmap(cmap_name).reversed() if flip else plt.get_cmap(cmap_name)
+        fig.colorbar(mpl_cm.ScalarMappable(norm=norm, cmap=cmap),
+                     cax=ax, orientation="horizontal", ticks=ticks)
+        ax.set_xlabel(label, fontsize=8.5)
+        ax.tick_params(labelsize=8, length=2)
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", transparent=True)
+    # tight: 自动扩展画布容纳全部文字, 杜绝任何方向上的裁切
+    fig.savefig(buf, format="png", transparent=True, bbox_inches="tight", pad_inches=0.02)
     plt.close(fig)
     return buf.getvalue()
 
 
 # ---------------- 页面 ----------------
-st.set_page_config(page_title="河南土壤水分干旱监测平台", layout="wide")
-st.title("河南土壤水分干旱监测平台 (2016–2025, 4–5 月 SSI)")
+st.set_page_config(page_title="中原农情旱涝双端风险研判与空间态势感知系统", page_icon="🌾", layout="wide")
 
-# ---- 侧边栏: 图层控制 ----
-st.sidebar.header("图层控制")
-version = st.sidebar.radio(
-    "土壤水分版本",
-    ["浅层根区（0-28cm）", "表层（0-7cm）"],
-    index=0,  # 默认浅层根区: 分析得出的产量最优指标
-    help="浅层根区为 0-28cm 两层平均, 与冬小麦产量相关性最强; 表层为 0-7cm swvl1",
-)
-LAYER_PATHS = VERSIONS[version]["layers"]  # 当前版本的图层路径, 供各控件/渲染使用
-month = st.sidebar.select_slider(
-    "月份 (数据含每年 4、5 月, 共 20 个月)",
-    options=MONTHS, value=MONTHS[-1],
-)
+CSS = """
+<style>
+:root { --portal-blue:#1f6feb; --portal-blue-dark:#0b4da2; }
+html, body, [class*="css"] { font-family:"PingFang SC","Microsoft YaHei",sans-serif !important; }
+.stApp { background:#F5F7FA; }
+header[data-testid="stHeader"] { display:none; }
+#MainMenu, footer { visibility:hidden; }
+.block-container { padding-top:0rem; max-width:1440px; }
 
-HIGH_RISK = "未来高风险区"
-LAYER_OPTIONS = ["现状SSI"] + list(LAYER_PATHS.keys()) + [HIGH_RISK]
-sel_layers = st.sidebar.multiselect(
-    "叠加图层 (可多选, 按勾选顺序叠加)",
-    LAYER_OPTIONS, default=["现状SSI"],
-    help="可同时勾选 现状SSI 与 未来高风险区 等多个图层叠加显示; 透明度由下方滑块统一控制",
-)
-opacity = st.sidebar.slider("叠加图层透明度", 0.0, 1.0, 0.85, 0.05)
-
-LAYER_DESC = {
-    "现状SSI": "现状SSI: 深蓝=极端偏干（干旱风险）, 深红=极端偏湿（渍害风险）, 黄=正常。",
-    "干旱频率": "干旱频率: 颜色越深, 2016-2025 年 4-5 月发生干旱的频率越高。",
-    "MK Z值": "MK Z值: 红=变干趋势（Z<0）, 蓝=变湿趋势（Z>0）, 颜色越深趋势越显著。",
-    "Sen斜率": "Sen斜率: 红=下降速率快（变干快）, 绿=上升速率快（变湿快）。",
-    "Hurst指数": "Hurst指数: 橙=趋势具有持续性, 紫=趋势可能反转。",
-    HIGH_RISK: f"{HIGH_RISK}: 深红色区域 = 过去显著变干且未来可能持续的高风险区。",
+/* Hero 视觉大图 (实景背景 + 深色遮罩 + 垂直居中) */
+.hero-banner { position:relative; height:380px; border-radius:0; overflow:hidden;
+  background-size:cover; background-position:center;
+  display:flex; align-items:center; justify-content:center; }
+.hero-overlay { position:absolute; inset:0; background:rgba(0,0,0,.5); }
+.hero-inner { position:relative; z-index:2; text-align:center; max-width:920px;
+  padding:0 28px; width:100%; }
+.hero-inner h1 { color:#fff; font-size:3em; font-weight:700; margin:0 0 12px;
+  letter-spacing:1px; text-shadow:0 2px 12px rgba(0,0,0,.55); }
+.hero-inner .sub { color:#E0E0E0; font-size:15px; margin:0 0 28px;
+  text-shadow:0 1px 6px rgba(0,0,0,.45); }
+/* 全局搜索栏 (悬浮于 Hero 底部, 真实检索) */
+div[data-testid="stTextInput"] { position:relative; z-index:6; margin-top:-50px; }
+div[data-testid="stTextInput"] input {
+  height:54px !important; border-radius:999px !important;
+  border:1px solid #e6ebf2 !important; background:#fff !important;
+  box-shadow:0 8px 22px rgba(16,42,80,.22) !important;
+  font-size:15px !important; padding:0 26px !important;
 }
-st.sidebar.caption("\n\n".join(LAYER_DESC[l] for l in sel_layers) if sel_layers else "未选择叠加图层")
+div[data-testid="stTextInput"] input::placeholder { color:#8a94a6; opacity:1; }
+.search-hint { background:#fff; border:1px solid #dbe7f5; color:#12325e; font-size:12.5px;
+  padding:7px 14px; border-radius:10px; box-shadow:0 2px 8px rgba(16,42,80,.08);
+  text-align:center; margin-top:2px; }
 
-cube, bounds, transform = load_ssi(version)
-west, south, east, north = bounds
-band_idx = MONTHS.index(month)
+.stat-card {
+  background:#FFFFFF; border-radius:12px; padding:20px 22px; height:118px;
+  border:1px solid #eef1f6; box-shadow:0 10px 26px rgba(16,42,80,.20);
+  margin-top:22px;
+  transition:box-shadow .2s ease, transform .2s ease;
+}
+.stat-card:hover { box-shadow:0 14px 30px rgba(16,42,80,.26); transform:translateY(-2px); }
+.stat-icon { font-size:22px; }
+.stat-num { font-size:30px; font-weight:700; color:var(--portal-blue); line-height:1.15; margin-top:6px; }
+.stat-num small { font-size:14px; font-weight:500; color:#5b6572; margin-left:2px; }
+.stat-label { font-size:13px; color:#5b6572; margin-top:2px; }
 
-# ================= Tab 布局 =================
-tab_map, tab_db = st.tabs(["空间监测地图", "旱涝属性数据库"])
+.stTabs [data-baseweb="tab-list"] { gap:8px; background:transparent; margin-top:6px; }
+.stTabs [data-baseweb="tab"] {
+  background:#FFFFFF; border-radius:10px 10px 0 0; padding:10px 24px;
+  border:1px solid #eef1f6; border-bottom:none; font-weight:600; color:#3a4552;
+}
+.stTabs [aria-selected="true"] { color:var(--portal-blue); border-top:3px solid var(--portal-blue); }
 
-# ================= Tab 1: 空间监测地图 =================
-with tab_map:
-    # ---- folium 地图: 各勾选图层 渲染为 PNG -> ImageOverlay 依次叠加 ----
-    # 底图: Esri.WorldGrayCanvas (免费无需 API Key; Carto 已强制 Key, 会出现水印)
-    city_s, city_w, city_n, city_e = load_city_bounds()  # 河南省外包框, 供 fit_bounds 用
-    m = folium.Map(location=[33.8, 113.5], tiles=None)
-    folium.TileLayer(  # 浅灰纯色底图, 不带任何标签
-        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
-        attr="Esri", name="Esri 灰底图", control=False,
-    ).add_to(m)
+[data-testid="stVerticalBlockBorderWrapper"] {
+  background:#FFFFFF; border-radius:12px !important; border:1px solid #eef1f6 !important;
+  box-shadow:0 4px 6px rgba(0,0,0,.05); padding:10px 14px;
+}
+.card-title { font-size:16px; font-weight:700; color:#1a2433; margin:2px 0 10px; }
+.card-title .tag { font-size:12px; font-weight:500; color:#8a94a6; margin-left:8px; }
 
-    legend_jobs = []  # 待渲染图例: (is_risk, vmin, vmax, flip, cmap_name, ticks, label)
-    for disp in sel_layers:
-        if disp == "现状SSI":
-            img_uri, vmin, vmax = render_layer_png(version, "SSI", band_idx)
-            legend_jobs.append((False, vmin, vmax, False, "RdYlBu_r", (-2, -1, 0, 1, 2),
-                                "水分胁迫等级: 深蓝=极端偏干（干旱风险）, 深红=极端偏湿（渍害风险）"))
-        elif disp == HIGH_RISK:
-            img_uri, _, _ = render_layer_png(version, HIGH_RISK)
-            legend_jobs.append((True, None, None, None, None, (),
-                                "红色区域 = 未来持续变干高风险区 (静态图层, 不随月份变化)"))
-        else:
-            img_uri, vmin, vmax = render_layer_png(version, disp)
-            st_cfg = LAYER_STYLE[disp]
-            if st_cfg["vmin"] is not None:  # Sen斜率 (None) 已在渲染函数内取数据实际范围
-                vmin, vmax = st_cfg["vmin"], st_cfg["vmax"]
-            ticks = st_cfg["ticks"] or np.linspace(vmin, vmax, 5).round(3).tolist()
-            legend_jobs.append((False, vmin, vmax, st_cfg["flip"], st_cfg["cmap"], tuple(ticks),
-                                st_cfg["label"] + " (静态图层, 不随月份变化)"))
-        folium.raster_layers.ImageOverlay(
-            image=img_uri,  # data URI (matplotlib 渲染的 PNG, NoData 已透明)
-            bounds=[[south, west], [north, east]],
-            opacity=opacity,
-        ).add_to(m)
-        if disp == HIGH_RISK:  # 高风险连片区域: 矢量多边形 (栅格矢量化+平滑), 警示红填充 + 深红边界
-            folium.GeoJson(
-                load_high_risk_geojson(version),
-                style_function=lambda f: {
-                    "fillColor": "#d23232",   # RGB [210, 50, 50] 警示红
-                    "fillOpacity": 0.75 * opacity,
-                    "color": "#961414",       # RGB [150, 20, 20] 深红边界
-                    "weight": 1.5,
-                    "fill": True,
-                },
-            ).add_to(m)
-    # 地级市边界线: 极浅的细灰线, 仅作参考不抢视觉焦点
-    folium.GeoJson(
-        load_city_geojson(),
-        style_function=lambda f: {"color": "#c8c8c8", "weight": 0.8, "opacity": 1.0, "fill": False},
-    ).add_to(m)
-    # 去掉地名 Tooltip 的白色背景框与 Leaflet 右下角版权水印, 通过注入 CSS 覆盖默认样式
-    MAP_CSS = """
-    <style>
-      .leaflet-tooltip.city-label, .leaflet-tooltip.city-label::before {
-        background: transparent !important; border: none !important;
-        box-shadow: none !important; padding: 0 !important;
-      }
-      .leaflet-control-attribution { display: none !important; }
-    </style>
-    """
-    m.get_root().html.add_child(folium.Element(MAP_CSS))
-    # 仅标注河南省内地级市名: Marker + 永久 Tooltip (居中, 深灰小字, 无背景框, 无图标)
-    LABEL_STYLE = "color:#555555;font-size:10px;font-weight:500;padding:0;"
-    NO_ICON = folium.DivIcon(html="", icon_size=(0, 0))  # 隐藏默认蓝色图钉
-    for name, (clat, clon) in load_city_labels():
-        folium.Marker(
-            location=[clat, clon],
-            tooltip=folium.Tooltip(name, permanent=True, direction="center",
-                                   offset=(0, 0), style=LABEL_STYLE, class_name="city-label"),
-            icon=NO_ICON,
-        ).add_to(m)
-    # 视野自动缩放到刚好包裹河南省 (城市边界 shp 的外包框)
-    m.fit_bounds([[city_s, city_w], [city_n, city_e]], padding=(15, 15))
-    # 已点击像元标记
-    if st.session_state.get("click"):
-        cl = st.session_state.click
-        folium.CircleMarker(
-            location=[cl["lat"], cl["lon"]], radius=7,
-            color="#000000", weight=2, fill=True,
-            fill_color="#ffd700", fill_opacity=0.35,
-        ).add_to(m)
+/* 产品卡片 (统一高度 200px 容器内部) */
+.prod-title { font-size:14px; font-weight:700; color:#1a2433; line-height:1.3; }
+.prod-sub { font-size:11.5px; color:#8a94a6; margin:1px 0 4px; }
+.prod-thumb { width:100%; height:82px; object-fit:cover; border-radius:6px;
+              border:1px solid #eef1f6; display:block; }
 
-    if sel_layers:
-        ttl = " + ".join(sel_layers)
-        st.subheader(f"{month} · {ttl}" if "现状SSI" in sel_layers else ttl)
+/* 数据集卡片 */
+.ds-title { font-size:15px; font-weight:700; color:#1a2433; margin-bottom:6px; line-height:1.35; }
+.ds-desc { font-size:12.5px; color:#5b6572; line-height:1.5; min-height:74px; }
+
+.stButton>button, .stDownloadButton>button {
+  border-radius:8px; background:var(--portal-blue); color:#fff; border:none;
+  box-shadow:0 2px 6px rgba(31,111,235,.25); font-weight:600; padding:0 20px;
+}
+.stButton>button:hover, .stDownloadButton>button:hover { background:var(--portal-blue-dark); color:#fff; }
+.stButton>button:disabled { background:#9fbdf2; color:#fff; }
+
+/* HTML 数据表 (淡蓝吸顶表头, 细线框, 滚动) */
+.tbl-wrap { max-height:520px; overflow:auto; border:1px solid #eef1f6; border-radius:10px; }
+table.portal-tbl { width:100%; border-collapse:collapse; font-size:13px; }
+.portal-tbl thead th {
+  position:sticky; top:0; z-index:2; background:#dbe7f5; color:#12325e;
+  font-weight:700; padding:9px 12px; text-align:left; white-space:nowrap;
+}
+.portal-tbl tbody td { padding:8px 12px; border-top:1px solid #f0f3f8; color:#333; white-space:nowrap; }
+.portal-tbl tbody tr:hover { background:#f5f9ff; }
+
+/* 综合研判框 */
+.judge-box { border-radius:10px; padding:14px 18px; font-size:13.5px; line-height:1.75;
+             border:1px solid; height:100%; }
+.judge-box .jb-head { font-weight:700; font-size:14px; margin-bottom:4px; }
+
+.lvl-badge {
+  display:inline-block; border-radius:999px; padding:4px 16px; color:#fff;
+  font-size:13.5px; font-weight:700; letter-spacing:1px;
+}
+</style>
+"""
+st.markdown(CSS, unsafe_allow_html=True)
+
+# ---- Hero 视觉大图 Banner (实景背景 + 深色遮罩) ----
+@st.cache_data
+def load_banner_b64():
+    p = ROOT / "wheat_banner.jpg"
+    return base64.b64encode(p.read_bytes()).decode() if p.exists() else ""
+
+
+_b64 = load_banner_b64()
+_bg = f"url('data:image/jpeg;base64,{_b64}')" if _b64 else "none"
+st.markdown(
+    f"""
+    <div class="hero-banner" style="background-image:{_bg};">
+      <div class="hero-overlay"></div>
+      <div class="hero-inner">
+        <h1>中原农情旱涝双端风险研判与空间态势感知系统</h1>
+        <p class="sub">Henan Agro-moisture Risk Assessment &amp; Spatial Situation Awareness System · 覆盖 2016-2025 年多深度土壤水分数据集</p>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ---- 全局搜索栏 (真实检索, 悬浮于 Banner 底部) ----
+if st.session_state.get("_pending_clear"):
+    st.session_state["global_search"] = ""
+    st.session_state["_pending_clear"] = False
+
+_sL, _sC, _sR = st.columns([1, 2.4, 1])
+with _sC:
+    search_query = st.text_input(
+        "全局检索", "", key="global_search", label_visibility="collapsed",
+        placeholder="🔍 输入城市（如：商丘）、年份（如：2023）或数据集名称进行检索...")
+    q = (search_query or "").strip()
+
+    # 解析关键词: 年份 -> 时间滑块; 城市 -> 综合研判定位; 数据集名 -> 自动打开
+    year_hit = next((str(y) for y in range(2016, 2026) if str(y) in q), None) if q else None
+    city_hit = None
+    if q:
+        for _n in load_city_gdf()["name"].astype(str):
+            if norm_city(_n) and norm_city(_n) in q:
+                city_hit = _n
+                break
+        if city_hit is None:
+            city_hit = next((_n for _n in load_city_gdf()["name"].astype(str)
+                             if len(q) >= 2 and q in _n), None)
+    ds_hit = None
+    if q and not city_hit and not year_hit:
+        ds_hit = next((d for d in DATASETS if q in d["title"]), None)
+
+    # 联动注入 (仅当关键词变化时执行一次, 不覆盖用户后续手动操作)
+    if year_hit:
+        if st.session_state.get("_sy_applied") != year_hit:
+            if f"{year_hit}-04" in MONTHS:
+                st.session_state["month"] = f"{year_hit}-04"   # 时间滑块跳至该年 4 月
+            st.session_state["_sy_applied"] = year_hit
     else:
-        st.subheader("未选择叠加图层 (侧边栏勾选)")
-    res = st_folium(
-        m, height=620, use_container_width=True,
-        returned_objects=["last_clicked"], key="map",
-    )
-    # ---- 图例 (每个已选图层一张圆角卡片; 风险图层为两色分类, 其余为渐变条) ----
-    for job in legend_jobs:
-        st.image(render_legend_png(*job), use_container_width=True)
+        st.session_state["_sy_applied"] = ""
 
-    # ---- 统计面板 ----
-    def _nearest_cities(mask):
-        """高风险像元中心点 -> 最近地级市名, 按出现次数降序"""
-        from collections import Counter
+    if city_hit:
+        if st.session_state.get("_sc_applied") != city_hit:
+            _g = load_city_gdf()
+            _row = _g[_g["name"] == city_hit]
+            if len(_row):
+                _pt = _row.geometry.representative_point().iloc[0]  # 保证点在市界内
+                st.session_state["click"] = {"lon": float(_pt.x), "lat": float(_pt.y)}
+            st.session_state["_sc_applied"] = city_hit
+    else:
+        st.session_state["_sc_applied"] = ""
 
-        rows, cols = np.where(mask)
-        if len(rows) == 0:
-            return []
-        lons = transform.c + (cols + 0.5) * transform.a
-        lats = transform.f + (rows + 0.5) * transform.e
-        labels = load_city_labels()
-        names = []
-        for lon, lat in zip(lons, lats):
-            k = np.cos(np.radians(lat))  # 经度距离按纬度缩放
-            dists = [(lat - clat) ** 2 + (k * (lon - clon)) ** 2 for _, (clat, clon) in labels]
-            names.append(labels[int(np.argmin(dists))][0])
-        return [n for n, _ in Counter(names).most_common()]
+    if ds_hit:
+        if st.session_state.get("_sd_applied") != ds_hit["title"]:
+            st.session_state["ds_active"] = ds_hit["title"]
+            st.session_state[f"page_{ds_hit['title']}"] = 0
+            st.session_state["_sd_applied"] = ds_hit["title"]
+    else:
+        st.session_state["_sd_applied"] = ""
 
-    if "现状SSI" in sel_layers:
-        band = cube[band_idx]
-        valid_n = int(np.isfinite(band).sum())
-        dry_n = int((band <= -1).sum())
-        ratio = dry_n / valid_n if valid_n else 0.0
-        c1, c2, c3 = st.columns(3)
-        c1.metric("有效像元数", valid_n)
-        c2.metric("极端偏干像元 (SSI ≤ -1)", dry_n)
-        c3.metric(f"{month} 偏干面积占比", f"{ratio:.1%}")
-        st.progress(min(max(ratio, 0.0), 1.0))
-
-    if HIGH_RISK in sel_layers:
-        risk_mask, risk_valid, risk_criteria = load_high_risk(version)
-        high_n = int(risk_mask.sum())
-        risk_ratio = high_n / int(risk_valid.sum()) if risk_valid.any() else 0.0
-        cities = _nearest_cities(risk_mask)
-        c1, c2, c3 = st.columns(3)
-        c1.metric("高风险像元数", high_n)
-        c2.metric("高风险面积占比", f"{risk_ratio:.1%}")
-        if cities:
-            shown = "、".join(cities[:4]) + ("等" if len(cities) > 4 else "")
-            c3.metric("主要涉及城市", shown)
+    # 搜索状态提示
+    if q:
+        _parts = []
+        if city_hit:
+            _parts.append(f"📍 已定位 <b>{city_hit}</b> · 地图下方已生成综合研判卡片")
+        if year_hit:
+            _parts.append(f"⏳ 时间滑块已跳转至 <b>{year_hit}-04</b>")
+        if ds_hit:
+            _parts.append(f"🗂️ 已自动打开数据集 <b>{ds_hit['title']}</b>")
+        if _parts:
+            st.markdown("<div class='search-hint'>🔍 " + " ｜ ".join(_parts) + "</div>",
+                        unsafe_allow_html=True)
         else:
-            c3.metric("主要涉及城市", "—")
-        st.caption(f"判定标准: {risk_criteria}")
-        if high_n == 0:
-            st.info("当前判据下无高风险像元。")
+            st.markdown(
+                "<div class='search-hint' style='border-color:#f5c6cb;color:#8a1c1c'>"
+                f"🔍 未识别到对应的城市 / 年份 / 数据集，请检查关键词（如：商丘、2023、产量面板）</div>",
+                unsafe_allow_html=True)
+        if st.button("✖ 清空搜索", key="btn_clear_search"):
+            st.session_state["_pending_clear"] = True
+            st.rerun()
 
-    # ---- 点击处理: st_folium 返回的 last_clicked 坐标 -> 像元 ----
+# ---- 统计卡片 ----
+STAT_CARDS = [
+    ("📍", "18", "个", "地市覆盖"),
+    ("🗄️", "162", "条", "面板数据 (市-年)"),
+    ("⏳", "10", "年", "长时序记录 (2016–2025)"),
+    ("🗺️", "6", "类", "空间数据产品"),
+]
+for col, (icon, num, unit, label) in zip(st.columns(4), STAT_CARDS):
+    col.markdown(
+        f'<div class="stat-card"><div class="stat-icon">{icon}</div>'
+        f'<div class="stat-num">{num}<small>{unit}</small></div>'
+        f'<div class="stat-label">{label}</div></div>',
+        unsafe_allow_html=True,
+    )
+st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+
+tab_map, tab_db = st.tabs(["空间态势感知", "旱涝属性数据库"])
+
+# ================= Tab 1: 空间态势感知 =================
+with tab_map:
+    map_col, ctrl_col = st.columns([3.5, 1.5], gap="medium")
+
+    active_product = st.session_state.get("map_layer", "ssi")
+    prod = next(p for p in PRODUCTS if p["key"] == active_product)
+
+    # ---- 右侧: 控制面板 + 全省旱涝面积概览 + 极值城市 Top3 ----
+    with ctrl_col:
+        with st.container(border=True):
+            st.markdown('<div class="card-title">控制面板</div>', unsafe_allow_html=True)
+            version = st.selectbox("数据层级", list(VERSIONS.keys()), index=0, key="ver",
+                                   help="浅层根区为 0-28cm 两层平均, 与冬小麦产量相关性最强; 表层为 0-7cm swvl1")
+            month = st.select_slider("月份", options=MONTHS, value=MONTHS[-1], key="month",
+                                     help="每年 4、5 月, 共 20 期; 仅作用于「现状旱涝状态」图层与综合研判框")
+            st.caption("当前: " + version + " · " + month)
+
+        band_idx = MONTHS.index(month)
+        cube, _, transform = load_ssi(version)
+
+        with st.container(border=True):
+            st.markdown(f'<div class="card-title">🍩 全省旱涝面积概览<span class="tag">{month}</span></div>',
+                        unsafe_allow_html=True)
+            band = cube[band_idx]
+            fin = np.isfinite(band)
+            n_dry = int(((band < -1) & fin).sum())
+            n_wet = int(((band > 1) & fin).sum())
+            n_norm = int(fin.sum()) - n_dry - n_wet
+            fig_pie = go.Figure(go.Pie(
+                labels=["偏干 (SSI<-1)", "正常", "偏湿 (SSI>1)"],
+                values=[n_dry, n_norm, n_wet], hole=0.58,
+                marker=dict(colors=["#D32F2F", "#c9d1d9", "#1976D2"]),  # 红=偏干, 蓝=偏湿
+                textinfo="percent", textposition="inside", textfont_size=12, sort=False))
+            fig_pie.update_layout(height=300, margin=dict(l=10, r=10, t=16, b=42),
+                                  showlegend=True,
+                                  legend=dict(orientation="h", yanchor="top", y=-0.05,
+                                              xanchor="center", x=0.5, font_size=11),
+                                  paper_bgcolor="rgba(0,0,0,0)",
+                                  annotations=[dict(text=month, x=0.5, y=0.5, font_size=13,
+                                                    showarrow=False, font_color="#5b6572")])
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+        with st.container(border=True):
+            st.markdown(f'<div class="card-title">🏙️ 当前极值城市 Top 3<span class="tag">SSI 最低 / 最高</span></div>',
+                        unsafe_allow_html=True)
+            srt = sorted(((k, v) for k, v in city_ssi_all(version, band_idx).items()
+                          if np.isfinite(v)), key=lambda kv: kv[1])
+            low3, high3 = srt[:3], srt[-3:][::-1]
+            names = [k for k, _ in high3] + [k for k, _ in low3[::-1]]
+            vals = [v for _, v in high3] + [v for _, v in low3[::-1]]
+            fig_top = go.Figure(go.Bar(
+                y=names, x=vals, orientation="h",
+                # 红=偏干(SSI<0), 蓝=偏湿(SSI>0)
+                marker_color=["#1976D2" if v > 0 else "#D32F2F" for v in vals],
+                text=[f"{v:+.2f}" for v in vals], textposition="outside", textfont_size=11))
+            xr = max(abs(min(vals)), abs(max(vals))) + 0.6
+            fig_top.update_layout(height=250, margin=dict(l=6, r=34, t=6, b=6),
+                                  yaxis=dict(tickfont=dict(size=11.5)),
+                                  xaxis=dict(zeroline=True, zerolinecolor="#999",
+                                             range=[-xr, xr], showticklabels=False),
+                                  paper_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig_top, use_container_width=True)
+
+    # ---- 左侧主地图 (图例悬浮左下角) ----
+    with map_col:
+        with st.container(border=True):
+            tag = f"{month} · {version}" if active_product == "ssi" else version
+            st.markdown(f'<div class="card-title">{prod["icon"]} {prod["name"]}<span class="tag">{tag}</span></div>',
+                        unsafe_allow_html=True)
+            img_uri, bounds = render_product_png(version, active_product, band_idx)
+            west, south, east, north = bounds
+            m = folium.Map(location=[33.8, 113.5], tiles=None, zoom_control=True)
+            # 纯色底图 (.leaflet-container 背景色, 见 MAP_CSS): 不请求任何外部瓦片,
+            # 避免 Esri/OSM 被墙导致的 ERR_BLOCKED_BY_ORB / ERR_ABORTED
+            folium.raster_layers.ImageOverlay(
+                image=img_uri, bounds=[[south, west], [north, east]], opacity=0.9,
+            ).add_to(m)
+            folium.GeoJson(
+                load_city_geojson(),
+                style_function=lambda f: {"color": "#c8c8c8", "weight": 0.8, "opacity": 1.0, "fill": False},
+            ).add_to(m)
+            MAP_CSS = """
+            <style>
+              .leaflet-container { background: #eef1f5 !important; }
+              .leaflet-tooltip.city-label, .leaflet-tooltip.city-label::before {
+                background: transparent !important; border: none !important;
+                box-shadow: none !important; padding: 0 !important;
+              }
+              .leaflet-control-attribution { display: none !important; }
+            </style>
+            """
+            m.get_root().html.add_child(folium.Element(MAP_CSS))
+            LABEL_STYLE = "color:#555555;font-size:10px;font-weight:500;padding:0;"
+            NO_ICON = folium.DivIcon(html="", icon_size=(0, 0))
+            for name, (clat, clon) in load_city_labels():
+                folium.Marker(
+                    location=[clat, clon],
+                    tooltip=folium.Tooltip(name, permanent=True, direction="center",
+                                           offset=(0, 0), style=LABEL_STYLE, class_name="city-label"),
+                    icon=NO_ICON,
+                ).add_to(m)
+            # 图例悬浮: 地图左下角 (半透明小卡片)
+            lg_b64 = base64.b64encode(render_legend_png(version, active_product)).decode()
+            m.get_root().html.add_child(folium.Element(
+                f'<div style="position:absolute; bottom:18px; left:18px; z-index:9999; '
+                f'background:rgba(255,255,255,.9); padding:10px 12px 8px; border-radius:9px; '
+                f'box-shadow:0 2px 8px rgba(0,0,0,.18); border:1px solid #e6ebf2; '
+                f'min-width:240px;">'
+                f'<img src="data:image/png;base64,{lg_b64}" style="width:232px; display:block;"></div>'
+            ))
+            city_s, city_w, city_n, city_e = load_city_bounds()
+            m.fit_bounds([[city_s, city_w], [city_n, city_e]], padding=(4, 4))
+            if st.session_state.get("click"):
+                _cl = st.session_state.click
+                folium.CircleMarker(
+                    location=[_cl["lat"], _cl["lon"]], radius=7,
+                    color="#000000", weight=2, fill=True,
+                    fill_color="#ffd700", fill_opacity=0.35,
+                ).add_to(m)
+            res = st_folium(m, height=700, use_container_width=True,
+                            returned_objects=["last_clicked"], key="map")
+
+        # ---- 数据产品卡片阵列 (2行3列, 统一高度 200px) ----
+        st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+        for row_i in range(2):
+            cols = st.columns(3)
+            for col, p in zip(cols, PRODUCTS[row_i * 3: row_i * 3 + 3]):
+                with col:
+                    with st.container(height=200, border=True):
+                        st.markdown(f'<div class="prod-title">{p["icon"]} {p["name"]}</div>'
+                                    f'<div class="prod-sub">{p["sub"]}</div>',
+                                    unsafe_allow_html=True)
+                        st.markdown(f'<img class="prod-thumb" src="{render_thumb_uri(version, p["key"], band_idx)}">',
+                                    unsafe_allow_html=True)
+                        if p["key"] == active_product:
+                            st.button("✓ 当前图层", key=f"prod_btn_{p['key']}", disabled=True,
+                                      use_container_width=True)
+                        elif st.button("切换到主地图", key=f"prod_btn_{p['key']}",
+                                       use_container_width=True):
+                            st.session_state["map_layer"] = p["key"]
+                            st.rerun()
+
+    # ---- 点击 -> 综合研判框 ----
     last = (res or {}).get("last_clicked") if isinstance(res, dict) else None
     if last and isinstance(last, dict) and "lat" in last and "lng" in last:
-        lon, lat = float(last["lng"]), float(last["lat"])
-        col = int((lon - transform.c) / transform.a)
-        row = int((lat - transform.f) / transform.e)
-        if 0 <= row < cube.shape[1] and 0 <= col < cube.shape[2] and np.isfinite(cube[0, row, col]):
-            st.session_state.click = {"row": row, "col": col, "lon": lon, "lat": lat}
+        st.session_state.click = {"lon": float(last["lng"]), "lat": float(last["lat"])}
 
-    # ---- 折线图: 全省平均 SSI ----
-    st.subheader("全省平均 SSI 时间变化 (2016–2025, 4–5 月)")
-    mean_ssi = np.nanmean(cube, axis=(1, 2))
-    df_mean = pd.DataFrame({"月份": MONTHS, "全省平均SSI": mean_ssi}).set_index("月份")
-    st.line_chart(df_mean, x_label="月份", y_label="SSI")
-
-    # ---- 层位对比: 五层 SSI x 冬小麦产量相关系数 (数据驱动, 深色主题透明背景) ----
-    st.subheader("五层 SSI × 冬小麦产量相关系数")
-    try:
-        _corr = load_layer_corr().sort_values("相关系数r", key=lambda s: s.abs(), ascending=False)
-
-        def _sig_stars(p):
-            return "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else ""))
-
-        # 深色主题: 显著砖红 [200,70,70] / 不显著深灰 [100,100,100]; 背景全透明
-        _colors = ["rgb(200,70,70)" if p < 0.05 else "rgb(100,100,100)" for p in _corr["p值"]]
-        _txt_color = "#e6e6e6"      # 浅灰白文字, 深色背景上清晰
-        _axis_color = "#b3b3b3"
-        fig_corr = go.Figure(go.Bar(
-            x=_corr["层级"], y=_corr["相关系数r"],
-            marker_color=_colors,
-            text=[f"{r:.2f}{_sig_stars(p)}" for r, p in zip(_corr["相关系数r"], _corr["p值"])],
-            textposition="outside", textfont=dict(size=18, color=_txt_color),
-            hovertemplate="%{x}<br>r = %{y:.3f}<extra></extra>",
-        ))
-        fig_corr.add_hline(y=0, line_width=1, line_color="#888888")
-        fig_corr.update_layout(
-            height=400, margin=dict(l=10, r=10, t=36, b=10),
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color=_txt_color),
-            yaxis=dict(range=[-0.42, 0.2], title=dict(text="Pearson r", font=dict(size=15, color=_axis_color)),
-                       showgrid=False, zeroline=False, showline=True, linecolor=_axis_color,
-                       tickfont=dict(size=13, color=_axis_color)),
-            xaxis=dict(showgrid=False, showline=True, linecolor=_axis_color,
-                       tickfont=dict(size=15, color=_txt_color), tickangle=-18),
-        )
-        st.plotly_chart(fig_corr, use_container_width=True)
-        st.caption("表层（0-7cm）与浅层根区（0-28cm）SSI 同产量距平显著负相关，深层（28-100cm）及全根区加权不显著：0-28cm 对土壤水分异常波动最敏感。"
-                   "产量距平由土壤水分异常波动（旱涝双端）驱动——样本期减产集中于偏湿端：重度偏湿年平均减产约 2.5%~2.9%，中度干旱年减产率≈0；"
-                   "剔除 2018（湿害）、2023（烂场雨）两个偏湿灾年后 r 归零（+0.02），负相关主要由这两个年份贡献。")
-    except Exception as exc:
-        st.info(f"层位对比数据暂不可用（{exc}）")
-
-    # ---- 折线图: 点击像元的 20 个月 SSI (plotly) ----
-    st.subheader("点击位置 SSI 序列 (20 个月)")
-    if st.session_state.get("click"):
-        cl = st.session_state.click
-        series = cube[:, cl["row"], cl["col"]]
-        st.markdown(f"**选中像元**: 行 {cl['row']}, 列 {cl['col']} "
-                    f"(约 {cl['lon']:.3f}°E, {cl['lat']:.3f}°N)")
-        fig_px = go.Figure(go.Scatter(
-            x=MONTHS, y=series, mode="lines+markers",
-            line=dict(color="#d62728", width=2), marker=dict(size=6),
-        ))
-        fig_px.add_hline(y=0, line_dash="dash", line_color="gray",
-                         annotation_text="SSI = 0")
-        fig_px.update_layout(
-            height=320, margin=dict(l=10, r=10, t=10, b=10),
-            yaxis_title="SSI", xaxis_title="月份",
-        )
-        st.plotly_chart(fig_px, use_container_width=True)
-
-        # ---- 该市历史旱涝事件序列与平均减产率 (点击点所属城市; 面板内容随点击城市切换) ----
-        city = find_city_name(cl["lon"], cl["lat"])
-        st.subheader(f"历史旱涝事件序列与平均减产率 · {city}" if city else "历史旱涝事件序列与平均减产率")
-        if city is None:
-            st.info("点击位置不在任何地级市界内, 无法匹配产量统计数据")
-        else:
-            key = norm_city(city)
-            _sr = load_yield_stats(version)
-            _sr = _sr[_sr["key"] == key]
-            _ser = load_yield_series(version)
-            _ser = _ser[_ser["key"] == key].sort_values("年份")
-            if _sr.empty or _ser.empty:
-                st.info(f"{city} 暂无产量统计数据")
+    with st.container(border=True):
+        if st.session_state.get("click"):
+            cl = st.session_state.click
+            city = find_city_name(cl["lon"], cl["lat"])
+            if city is None:
+                st.markdown('<div class="card-title">综合研判</div>', unsafe_allow_html=True)
+                st.info("点击位置不在任何地级市界内, 请点击河南省内区域")
             else:
-                sr = _sr.iloc[0]
-                r_v, p_v = float(sr["Pearson_r"]), float(sr["p值"])
-                # 中度以上 (中度+重度) 干旱: 按样本数加权合并平均减产率
-                _lv, _wt = [], []
-                for _c, _n in (("中度平均减产率%", "中度样本"), ("重度平均减产率%", "重度样本")):
-                    if int(sr[_n]) > 0 and np.isfinite(sr[_c]):
-                        _lv.append(float(sr[_c])); _wt.append(int(sr[_n]))
-                mod_plus = float(np.average(_lv, weights=_wt)) if _lv else np.nan
-                y1, y2, y3 = st.columns(3)
-                y1.metric("SSI-产量相关系数 r", f"{r_v:+.2f}" if np.isfinite(r_v) else "—",
-                          help="产量距平 与 4-5月SSI 的 Pearson 相关。样本期 r 为负：减产由土壤水分异常波动（旱涝双端）中的偏湿端驱动——"
-                               "重度偏湿年（2018 湿害、2023 烂场雨）平均减产 2.5%~2.9%，而中度干旱年减产率≈0；偏旱端的减产效应有待更长序列验证")
-                y2.metric("显著性 p 值", (f"{p_v:.3f}" if np.isfinite(p_v) else "—")
-                          + (" (显著)" if np.isfinite(p_v) and p_v < 0.05 else ""))
-                y3.metric("中度以上干旱平均减产率",
-                          f"{mod_plus:+.1f}%" if np.isfinite(mod_plus) else "无样本",
-                          help="SSI ≤ -1.0 年份的产量相对趋势值平均偏差; 负值 = 减产")
-                # 双 Y 轴对比: 左轴 产量距平 (柱), 右轴 4-5月SSI (线)
-                fig_y = go.Figure()
-                fig_y.add_trace(go.Bar(
-                    x=_ser["年份"], y=_ser["距平"], name="产量距平 (万吨, 左轴)",
-                    marker_color=np.where(_ser["距平"] >= 0, "#7aa6d8", "#d23232"),
-                    opacity=0.8,
-                ))
-                fig_y.add_trace(go.Scatter(
-                    x=_ser["年份"], y=_ser["SSI"], name="4-5月 SSI (右轴)",
-                    mode="lines+markers", yaxis="y2",
-                    line=dict(color="#1a1a1a", width=2), marker=dict(size=7),
-                ))
-                fig_y.update_layout(
-                    height=340, margin=dict(l=10, r=10, t=10, b=10),
-                    hovermode="x unified",
-                    yaxis=dict(title="产量距平 (万吨)", zeroline=True, zerolinecolor="#888"),
-                    yaxis2=dict(title="SSI", overlaying="y", side="right",
-                                zeroline=True, zerolinecolor="#d23232"),
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                )
-                st.plotly_chart(fig_y, use_container_width=True)
-                st.caption("柱=产量距平 (左轴, 负值=减产), 线=4-5月SSI (右轴, 越低越旱); 产量数据 2016-2024, SSI 2016-2025。"
-                           "产量距平随土壤水分异常波动（旱涝双端）变化：样本期减产年均为 4-5 月偏湿年（2023 烂场雨、2018 湿害霜冻），"
-                           "偏旱年份（2019、2020、2022）距平均为正。")
+                ssi_v = city_mean_ssi(city, cube, transform, band_idx)
+                lvl, lvl_color = stress_level(ssi_v)
+                yr = int(month[:4])
+                key = norm_city(city)
+                ser = load_yield_series(version)
+                row = ser[(ser["key"] == key) & (ser["年份"] == yr)]
+                loss = float(row["减产率%"].iloc[0]) if len(row) and np.isfinite(row["减产率%"].iloc[0]) else np.nan
+                anom = float(row["距平"].iloc[0]) if len(row) and np.isfinite(row["距平"].iloc[0]) else np.nan
 
-        # ---- 干旱事件列表 (游程理论, 按 行/列 精确匹配点击像元) ----
-        ev_px = load_events(version)
-        ev_px = ev_px[(ev_px["行"] == cl["row"]) & (ev_px["列"] == cl["col"])]
-        ev_px = ev_px.sort_values("起始月份")[["起始月份", "结束月份", "持续月数", "累积强度"]]
-        st.markdown(f"**该位置干旱事件档案** (SSI ≤ -1.0, 共 {len(ev_px)} 次)")
-        if len(ev_px):
-            st.dataframe(ev_px, use_container_width=True, hide_index=True)
+                st.markdown(
+                    f'<div class="card-title">📍 {city} · {yr} 年 {int(month[5:])} 月 综合研判'
+                    f'<span class="tag">数据层级: {version}</span></div>',
+                    unsafe_allow_html=True)
+                d_col, j_col, c_col = st.columns([1, 1.25, 1.35], gap="medium")
+                with d_col:
+                    r1c1, r1c2 = st.columns(2)
+                    r1c1.metric("全市平均 SSI", f"{ssi_v:+.2f}" if np.isfinite(ssi_v) else "—")
+                    with r1c2:
+                        st.markdown(
+                            f"<div style='font-size:13px;color:#5b6572'>水分胁迫等级</div>"
+                            f"<div style='margin-top:6px'><span class='lvl-badge' style='background:{lvl_color}'>{lvl}</span></div>",
+                            unsafe_allow_html=True)
+                    r2c1, r2c2 = st.columns(2)
+                    loss_txt = f"{loss:+.2f}%" if np.isfinite(loss) else "—"
+                    anom_txt = f"{anom:+.2f} 万吨" if np.isfinite(anom) else "—"
+                    r2c1.markdown(
+                        f"<div style='font-size:13px;color:#5b6572'>当年减产率</div>"
+                        f"<div style='font-size:20px;font-weight:700;color:#1f2d3d;white-space:nowrap'>{loss_txt}</div>"
+                        f"<div style='font-size:11px;color:#9aa3af'>(实际−趋势)/趋势×100，负=减产；2025 未公布</div>",
+                        unsafe_allow_html=True)
+                    r2c2.markdown(
+                        f"<div style='font-size:13px;color:#5b6572'>当年产量距平</div>"
+                        f"<div style='font-size:20px;font-weight:700;color:#1f2d3d;white-space:nowrap'>{anom_txt}</div>"
+                        f"<div style='font-size:11px;color:#9aa3af'>实际产量 − 线性趋势产量</div>",
+                        unsafe_allow_html=True)
+                with j_col:
+                    # 动态研判文字
+                    if not np.isfinite(ssi_v):
+                        head, body, bg, bd, fc = ("⬜ 暂无数据",
+                                                  "该区域当前月份无有效 SSI 像元。",
+                                                  "#f2f4f8", "#d9dee6", "#5b6572")
+                    elif ssi_v >= 0.5 and np.isfinite(loss) and loss <= -2.0:
+                        head, body, bg, bd, fc = (
+                            "⚠️ 渍害减产风险",
+                            f"该市 {yr} 年 4–5 月土壤水分显著偏湿（SSI {ssi_v:+.2f}，{lvl}），"
+                            f"当年减产 {abs(loss):.2f}%（距平 {anom:+.2f} 万吨）。"
+                            f"该市面临渍害减产风险，建议疏通排涝设施，防范根系渍害与田间积水。",
+                            "#e8f1fd", "#bcd6f5", "#0b4da2")
+                    elif ssi_v >= 0.5:
+                        loss_txt = f"当年减产率 {loss:+.2f}%，减产尚不显著" if np.isfinite(loss) \
+                            else "当年产量数据尚未公布"
+                        head, body, bg, bd, fc = (
+                            "🌧️ 偏湿监测",
+                            f"该市当期土壤水分偏湿（SSI {ssi_v:+.2f}，{lvl}），{loss_txt}。"
+                            f"渍害致减产具有生育期窗口依赖性，建议关注灌浆—收获期降水过程，提前疏通排涝设施。",
+                            "#eef6fd", "#c7e0f7", "#1d5a8c")
+                    elif ssi_v <= -0.5:
+                        head, body, bg, bd, fc = (
+                            "🌵 偏干预警",
+                            f"该市当期土壤水分偏干（SSI {ssi_v:+.2f}，{lvl}）。"
+                            f"建议准备灌溉调度，优先保障拔节—抽穗期关键水分供应。",
+                            "#fdecea", "#f5c6cb", "#8a1c1c")
+                    else:
+                        head, body, bg, bd, fc = (
+                            "✅ 水分正常",
+                            f"该市当期土壤水分条件正常（SSI {ssi_v:+.2f}），产量形势总体稳定，按常规农情管理即可。",
+                            "#e9f7ef", "#b7e4c7", "#1e6b3a")
+                    st.markdown(
+                        f'<div class="judge-box" style="background:{bg};border-color:{bd};color:{fc}">'
+                        f'<div class="jb-head">{head}</div>{body}</div>',
+                        unsafe_allow_html=True)
+                with c_col:
+                    # 该市 10 年 产量距平(柱, 绿增红减) × SSI(线, 右轴) 微型图
+                    cs = ser[ser["key"] == key].sort_values("年份")
+                    yrs = cs["年份"].tolist()
+                    ssi_list = cs["SSI"].tolist()
+                    anom_list = [float(a) if np.isfinite(a) else None for a in cs["距平"]]
+                    bar_colors = ["#41ab5d" if (a is not None and a >= 0) else "#cb181d"
+                                  for a in anom_list]
+                    ssi_pt_colors = ["#9aa3af" if not np.isfinite(v)
+                                     else ("#D32F2F" if v < 0 else "#1976D2")
+                                     for v in ssi_list]  # 红=偏干, 蓝=偏湿
+                    fig_mini = go.Figure()
+                    fig_mini.add_bar(x=yrs, y=anom_list, marker_color=bar_colors,
+                                     name="产量距平 (万吨)")
+                    fig_mini.add_scatter(x=yrs, y=ssi_list, mode="lines+markers", yaxis="y2",
+                                         line=dict(color="#6b7280", width=2),
+                                         marker=dict(size=6, color=ssi_pt_colors), name="SSI")
+                    fig_mini.add_hline(y=0, line=dict(color="#999", width=1))
+                    fig_mini.update_layout(
+                        height=250, margin=dict(l=38, r=38, t=52, b=8),
+                        title=dict(text=f"{city} 2016–2025 产量距平 × SSI", font_size=12,
+                                   y=0.98, yanchor="top"),
+                        yaxis=dict(title=dict(text="距平 (万吨)", font=dict(size=10)),
+                                   zeroline=False, tickfont_size=10),
+                        yaxis2=dict(title=dict(text="SSI", font=dict(size=10)),
+                                    overlaying="y", side="right", showgrid=False,
+                                    tickfont_size=10),
+                        legend=dict(orientation="h", y=1.02, yanchor="bottom",
+                                    x=0.5, xanchor="center", font_size=10),
+                        paper_bgcolor="rgba(0,0,0,0)")
+                    st.plotly_chart(fig_mini, use_container_width=True)
+                if not np.isfinite(loss):
+                    st.caption(f"{yr} 年产量数据尚未公布, 研判仅基于 SSI 与等级")
         else:
-            st.info("该位置 2016-2025 年无干旱事件")
-    else:
-        st.info("在地图上点击任意像元, 此处将显示该位置 2016-04 ~ 2025-05 的 SSI 折线图")
+            st.markdown('<div class="card-title">综合研判</div>', unsafe_allow_html=True)
+            st.info("在地图上点击任意城市, 此处将生成该市「数据 + 研判文字」的综合研判框")
 
 # ================= Tab 2: 旱涝属性数据库 =================
 with tab_db:
-    st.subheader("旱涝属性数据库 (市-年面板)")
-    ser_all = load_yield_series(version).copy()
-    st.caption(f"数据源: {Path(VERSIONS[version]['yield_series']).name} —— 随侧边栏「土壤水分版本」切换; "
-               "点击列头可排序, 可用下方控件筛选")
+    if q and (city_hit or year_hit):
+        # ---- 搜索联动: 主面板按 城市 / 年份 过滤 ----
+        st.markdown(f'<div class="card-title" style="font-size:18px">🔍 检索结果'
+                    f'<span class="tag">关键词: {q}</span></div>',
+                    unsafe_allow_html=True)
+        with st.container(border=True):
+            _panel = load_yield_series("浅层根区（0-28cm）")
+            _mask = (_panel["城市"].astype(str).str.contains(q, regex=False, na=False)
+                     | _panel["key"].astype(str).str.contains(q, regex=False, na=False)
+                     | _panel["年份"].astype(str).str.contains(q, regex=False, na=False))
+            _sub = _panel[_mask]
+            if len(_sub):
+                st.caption(f"来源: 冬小麦产量面板（浅层根区）· 城市 / 年份 含「{q}」的 "
+                           f"{len(_sub)} 条记录（18 市 × 10 年面板）")
+                _disp = _sub.round({"SSI": 2, "实际产量": 2, "趋势产量": 2, "距平": 2, "减产率%": 2})
+                st.dataframe(_disp, use_container_width=True, hide_index=True,
+                             height=min(38 + 35 * len(_sub), 560))
+                st.download_button("下载检索结果 (CSV)",
+                                   _sub.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
+                                   file_name=f"检索结果_{q}.csv", mime="text/csv")
+            else:
+                st.warning("未找到匹配的数据，请检查城市名或年份。")
+    elif q and not ds_hit:
+        st.markdown('<div class="card-title" style="font-size:18px">🔍 检索结果</div>',
+                    unsafe_allow_html=True)
+        st.warning("未找到匹配的数据，请检查城市名或年份。")
+    else:
+        st.markdown('<div class="card-title" style="font-size:18px">核心数据集<span class="tag">点击卡片按钮查看对应数据表</span></div>',
+                    unsafe_allow_html=True)
+        for row_i in range(2):  # 2 行 x 3 列
+            cols = st.columns(3)
+            for col, ds in zip(cols, DATASETS[row_i * 3: row_i * 3 + 3]):
+                with col:
+                    with st.container(height=230, border=True):
+                        st.markdown(
+                            f'<div class="ds-title">{ds["icon"]} {ds["title"]}</div>'
+                            f'<div class="ds-desc">{ds["desc"]}</div>',
+                            unsafe_allow_html=True)
+                        if st.button("查看数据", key=f"ds_btn_{ds['title']}", use_container_width=True):
+                            st.session_state["ds_active"] = ds["title"]
+                            st.session_state[f"page_{ds['title']}"] = 0
 
-    f1, f2, f3 = st.columns([3, 2, 1])
-    city_opts = sorted(ser_all["城市"].dropna().unique().tolist())
-    city_sel = f1.multiselect("城市筛选", city_opts, default=city_opts)
-    yr_min, yr_max = int(ser_all["年份"].min()), int(ser_all["年份"].max())
-    yr_rng = f2.slider("年份范围", yr_min, yr_max, (yr_min, yr_max))
-    only_loss = f3.checkbox("仅看减产年", value=False,
-                            help="只保留 减产率% < 0 的市-年记录")
+        active = st.session_state.get("ds_active")
+        if active:
+            ds = next(d for d in DATASETS if d["title"] == active)
+            st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+            with st.container(border=True):
+                st.markdown(f'<div class="card-title">{ds["icon"]} {ds["title"]}<span class="tag">{ds["path"].name}</span></div>',
+                            unsafe_allow_html=True)
+                try:
+                    df = pd.read_csv(ds["path"], encoding="utf-8-sig")
+                except Exception as exc:
+                    st.error(f"数据文件读取失败: {exc}")
+                else:
+                    page_size = 50
+                    n_rows = len(df)
+                    n_pages = max(1, (n_rows + page_size - 1) // page_size)
+                    page_key = f"page_{ds['title']}"
+                    page = min(st.session_state.get(page_key, 0), n_pages - 1)
 
-    view = ser_all[ser_all["城市"].isin(city_sel) & ser_all["年份"].between(*yr_rng)]
-    if only_loss:
-        view = view[view["减产率%"] < 0]
-    view = view.sort_values(["年份", "城市"])
+                    p1, p2, p3 = st.columns([1, 1, 4])
+                    if p1.button("← 上一页", key=f"prev_{ds['title']}", disabled=(page <= 0)):
+                        st.session_state[page_key] = page - 1
+                        st.rerun()
+                    if p2.button("下一页 →", key=f"next_{ds['title']}", disabled=(page >= n_pages - 1)):
+                        st.session_state[page_key] = page + 1
+                        st.rerun()
+                    p3.markdown(
+                        f"<div style='padding-top:8px;color:#5b6572;font-size:13px'>"
+                        f"第 <b>{page + 1}</b> / {n_pages} 页 · 共 {n_rows} 行 · 每页 {page_size} 行 · 表格区域内可上下滚动</div>",
+                        unsafe_allow_html=True)
 
-    st.dataframe(
-        view, use_container_width=True, hide_index=True,
-        column_config={
-            "年份": st.column_config.NumberColumn(format="%d"),
-            "SSI": st.column_config.NumberColumn(format="%.3f"),
-            "实际产量": st.column_config.NumberColumn(format="%.2f"),
-            "趋势产量": st.column_config.NumberColumn(format="%.2f"),
-            "距平": st.column_config.NumberColumn(format="%+.2f"),
-            "减产率%": st.column_config.NumberColumn(format="%+.2f"),
-        },
-    )
-    c_dl, c_n = st.columns([1, 3])
-    c_dl.download_button(
-        "下载当前筛选结果 (CSV)",
-        view.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
-        file_name="旱涝属性数据库_筛选结果.csv", mime="text/csv",
-    )
-    c_n.caption(f"共 {len(view)} 条记录 (2025 年产量未公布, 仅有 SSI)")
+                    df_page = df.iloc[page * page_size: (page + 1) * page_size]
+                    tbl_html = df_page.to_html(index=False, classes="portal-tbl", border=0,
+                                               float_format=lambda v: f"{v:.3f}")
+                    st.markdown(f'<div class="tbl-wrap">{tbl_html}</div>', unsafe_allow_html=True)
+                    st.download_button("下载完整数据 (CSV)",
+                                       df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
+                                       file_name=ds["path"].name, mime="text/csv")
+        else:
+            st.info("👆 点击上方任意数据集卡片的「查看数据」, 此处将展示对应数据表 (每页 50 行, 可翻页)")
 
-    with st.expander("各市汇总: SSI-产量相关性 与 分级减产率", expanded=False):
-        stats_all = load_yield_stats(version)
-        st.dataframe(stats_all, use_container_width=True, hide_index=True)
-        st.caption(f"数据源: {Path(VERSIONS[version]['yield_stats']).name}")
+# ---- 页脚 ----
+st.markdown(
+    "<div style='text-align:center;color:#9aa3af;font-size:12px;margin:26px 0 10px'>"
+    "中原农情旱涝双端风险研判与空间态势感知系统 · 数据门户 (2016–2025, 4–5 月 SSI)</div>",
+    unsafe_allow_html=True,
+)
