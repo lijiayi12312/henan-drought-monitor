@@ -7,7 +7,8 @@
          高风险图层旱涝分离: Sen<0&Hurst>0.5=深红(未来干旱风险), Sen>0&Hurst>0.5=深蓝(未来渍害风险)
          图例悬浮于地图右上角; 点击城市 -> 综合研判框 (左数据 + 右动态研判文字)
   Tab2 - 2行3列 共 6 张核心数据集卡片 (统一高度), HTML 淡蓝表头表格 + 翻页
-运行:  python -m streamlit run app_portal.py --global.developmentMode false --server.port 8502
+运行:  $env:PYTHONPATH="C:\pylibs"; python -m streamlit run app.py
+(原 app_portal.py 已合并为 app.py; 旧版单页平台备份在 app_old_backup.py)
 """
 import base64
 import io
@@ -47,20 +48,20 @@ matplotlib.rcParams["axes.unicode_minus"] = False
 
 # ---------------- 数据路径 ----------------
 ROOT = _ROOT
-CITY_SHP = ROOT / "河南省市shp" / "河南省.shp"
+CITY_SHP = ROOT / "data" / "河南省市shp" / "河南省.shp"
 MONTHS = [f"{y}-{m:02d}" for y in range(2016, 2026) for m in (4, 5)]  # 20 个波段
 VERSIONS = {
     "浅层根区（0-28cm）": {
-        "ssi": ROOT / "4-5月河南SSI" / "4-5月河南SSI_shallow_2016-2025.tif",
-        "sen": ROOT / "Mann-Kendall 趋势检验" / "河南浅层SSI_4-5月_MK_Sen斜率_2016-2025.tif",
-        "hurst": ROOT / "hurst指数" / "河南浅层SSI_4-5月_Hurst指数_2016-2025.tif",
-        "yield_series": ROOT / "产量关联分析" / "city_yield_ssi_timeseries_shallow.csv",
+        "ssi": ROOT / "data" / "4-5月河南SSI" / "4-5月河南SSI_shallow_2016-2025.tif",
+        "sen": ROOT / "output" / "Mann-Kendall 趋势检验" / "河南浅层SSI_4-5月_MK_Sen斜率_2016-2025.tif",
+        "hurst": ROOT / "output" / "hurst指数" / "河南浅层SSI_4-5月_Hurst指数_2016-2025.tif",
+        "yield_series": ROOT / "output" / "产量关联分析" / "city_yield_ssi_timeseries_shallow.csv",
     },
     "表层（0-7cm）": {
-        "ssi": ROOT / "4-5月河南SSI" / "4-5月河南SSI_swvl1_2016-2025.tif",
-        "sen": ROOT / "Mann-Kendall 趋势检验" / "河南SSI_4-5月_MK_Sen斜率_2016-2025.tif",
-        "hurst": ROOT / "hurst指数" / "河南SSI_4-5月_Hurst指数_2016-2025.tif",
-        "yield_series": ROOT / "city_yield_ssi_timeseries.csv",
+        "ssi": ROOT / "data" / "4-5月河南SSI" / "4-5月河南SSI_swvl1_2016-2025.tif",
+        "sen": ROOT / "output" / "Mann-Kendall 趋势检验" / "河南SSI_4-5月_MK_Sen斜率_2016-2025.tif",
+        "hurst": ROOT / "output" / "hurst指数" / "河南SSI_4-5月_Hurst指数_2016-2025.tif",
+        "yield_series": ROOT / "output" / "产量关联分析" / "city_yield_ssi_timeseries.csv",
     },
 }
 
@@ -78,22 +79,22 @@ PRODUCTS = [
 DATASETS = [
     {"icon": "🌾", "title": "冬小麦产量面板（浅层根区）",
      "desc": "18 市 × 10 年 4-5 月浅层根区 SSI × 实际产量 / 趋势产量 / 距平 / 减产率，主分析数据集。",
-     "path": ROOT / "产量关联分析" / "city_yield_ssi_timeseries_shallow.csv"},
+     "path": ROOT / "output" / "产量关联分析" / "city_yield_ssi_timeseries_shallow.csv"},
     {"icon": "🌱", "title": "冬小麦产量面板（表层）",
      "desc": "同上面板结构的表层 swvl1 (0-7cm) 版本，供层位间对比验证。",
-     "path": ROOT / "city_yield_ssi_timeseries.csv"},
+     "path": ROOT / "output" / "产量关联分析" / "city_yield_ssi_timeseries.csv"},
     {"icon": "🌀", "title": "旱涝事件回溯库（游程理论）",
      "desc": "2016-2025 年 4-5 月逐像元干旱事件档案：起止月份、持续月数、累积强度。",
-     "path": ROOT / "游程理论" / "河南浅层SSI_4-5月_干旱事件_按真实时间_2016-2025.csv"},
+     "path": ROOT / "output" / "游程理论" / "河南浅层SSI_4-5月_干旱事件_按真实时间_2016-2025.csv"},
     {"icon": "📊", "title": "各市 SSI-产量关系统计（浅层）",
      "desc": "各市 Pearson r / p 值与轻中重度旱涝分级减产率汇总（浅层根区）。",
-     "path": ROOT / "产量关联分析" / "city_yield_analysis_shallow.csv"},
+     "path": ROOT / "output" / "产量关联分析" / "city_yield_analysis_shallow.csv"},
     {"icon": "📈", "title": "各市 SSI-产量关系统计（表层）",
      "desc": "各市 Pearson r / p 值与分级减产率汇总（表层 swvl1）。",
-     "path": ROOT / "city_yield_analysis.csv"},
+     "path": ROOT / "output" / "产量关联分析" / "city_yield_analysis.csv"},
     {"icon": "🗂️", "title": "五层 SSI × 产量相关对比表",
      "desc": "swvl1/swvl2/浅层根区/swvl3/全根区加权 五层相关系数与旱涝双端分级减产率。",
-     "path": ROOT / "产量关联分析" / "层级产量关联对比表.csv"},
+     "path": ROOT / "output" / "产量关联分析" / "层级产量关联对比表.csv"},
 ]
 
 
@@ -430,7 +431,7 @@ st.markdown(CSS, unsafe_allow_html=True)
 # ---- Hero 视觉大图 Banner (实景背景 + 深色遮罩) ----
 @st.cache_data
 def load_banner_b64():
-    p = ROOT / "wheat_banner.jpg"
+    p = ROOT / "assets" / "wheat_banner.jpg"
     return base64.b64encode(p.read_bytes()).decode() if p.exists() else ""
 
 

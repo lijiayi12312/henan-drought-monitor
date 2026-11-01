@@ -1,11 +1,12 @@
 # Streamlit Cloud 部署依赖 (Python 3.12)
-streamlit>=1.40
-streamlit-folium>=0.20
-folium>=0.17
-numpy>=1.26
-pandas>=2.0
-rasterio>=1.3.11
-geopandas>=1.0
-shapely>=2.0
-matplotlib>=3.8
-plotly>=5.18
+# 版本策略: 下限为已验证可用的最低版本, 上限锁定当前大版本, 避免云端解析到破坏性大版本更新
+streamlit>=1.40,<2.0
+streamlit-folium>=0.20,<1.0
+folium>=0.17,<0.20
+numpy>=1.26,<3.0
+pandas>=2.0,<3.0
+rasterio>=1.3.11,<2.0
+geopandas>=1.0,<2.0
+shapely>=2.0,<3.0
+matplotlib>=3.8,<4.0
+plotly>=5.18,<6.0

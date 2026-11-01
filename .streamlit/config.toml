@@ -1,3 +1,8 @@
+# streamlit 装在 C:\pylibs (非 site-packages), 会被误判为源码开发模式 (前端指向 3000 端口),
+# 显式关闭以保证 8501 端口正常提供页面
+[global]
+developmentMode = false
+
 [theme]
 base = "light"
 primaryColor = "#1f6feb"

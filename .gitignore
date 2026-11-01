@@ -1,18 +1,27 @@
-# Python 运行时产物
+# ---- Python 运行时产物 ----
 __pycache__/
+*.pyc
 *.py[cod]
 .venv/
 venv/
 
-# IDE / 工作区本地配置
+# ---- IDE / 本地工作区配置 ----
 .vscode/
+.idea/
 *.code-workspace
 .trae/
-.idea/
 
-# 系统杂项
-Thumbs.db
+# ---- 系统杂项 ----
 .DS_Store
+Thumbs.db
 
-# Streamlit 本地密钥 (切勿提交)
+# ---- 大体积数据文件（.nc 不入库; .tif 需随仓库部署到 Streamlit Cloud, 保持入库）----
+data/**/*.nc
+output/**/*.nc
+
+# ---- 原始数据归档 ----
+*.zip
+
+# ---- 敏感信息（切勿提交）----
 .streamlit/secrets.toml
+.ssh-deploy/
