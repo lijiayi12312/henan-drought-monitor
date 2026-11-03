@@ -33,6 +33,7 @@ from matplotlib import pyplot as plt
 from matplotlib import colors as mpl_colors
 from matplotlib import patches as mpl_patches
 import matplotlib.font_manager as fm
+from PIL import Image, ImageFilter
 
 _ROOT = Path(__file__).resolve().parent
 _FONT_FILE = _ROOT / "assets" / "NotoSansCJKsc-Regular.otf"
@@ -428,7 +429,12 @@ def _fig_to_uri(rgba, cell_px=40, dpi=100):
     buf = io.BytesIO()
     fig.savefig(buf, format="png", transparent=True, pil_kwargs={"optimize": True})
     plt.close(fig)
-    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    # 图像级轻晕染: 小半径高斯模糊, 消除像元马赛克感而不糊成一片
+    buf.seek(0)
+    im = Image.open(buf).convert("RGBA").filter(ImageFilter.GaussianBlur(1.5))
+    out = io.BytesIO()
+    im.save(out, format="PNG", optimize=True)
+    return "data:image/png;base64," + base64.b64encode(out.getvalue()).decode()
 
 
 @st.cache_data
