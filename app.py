@@ -24,7 +24,7 @@ if _pylibs.exists():
 import folium
 import plotly.graph_objects as go
 import streamlit as st
-from streamlit_folium import st_folium
+import streamlit.components.v1 as components
 
 import matplotlib
 matplotlib.use("Agg")
@@ -650,12 +650,9 @@ if "current_table_name" not in st.session_state:
 # 主分析数据层级固定为浅层根区 (0-28cm, 与冬小麦产量相关性最强)
 version = "浅层根区（0-28cm）"
 
-# ---- 处理地图/卡片点击回传的延迟写入 (在侧边栏控件实例化前写入, 规避 StreamlitWidgetAlreadyInstantiatedError) ----
-# Streamlit 规定: 控件一旦实例化(带 key), 之后不能再直接写该 key。故地图点击/图层卡片点击
-# 先写入独立的"请求键", 再 st.rerun(); 本轮在控件创建前把它们回填到 current_city / map_layer。
-_request_city = st.session_state.pop("_map_click_city", None)
-if _request_city and _request_city in city_names:
-    st.session_state["current_city"] = _request_city
+# ---- 处理图层卡片点击回传的延迟写入 (在控件实例化前写入, 规避 StreamlitWidgetAlreadyInstantiatedError) ----
+# Streamlit 规定: 控件一旦实例化(带 key), 之后不能再直接写该 key。故图层卡片点击
+# 先写入独立的"请求键", 再 st.rerun(); 本轮在控件创建前把它回填到 map_layer。
 _request_layer = st.session_state.pop("_map_layer_request", None)
 if _request_layer and _request_layer in [p["key"] for p in PRODUCTS]:
     st.session_state["map_layer"] = _request_layer
@@ -854,16 +851,8 @@ with tab1:
             ))
             city_s, city_w, city_n, city_e = load_city_bounds()
             m.fit_bounds([[city_s, city_w], [city_n, city_e]], padding=(4, 4))
-            res = st_folium(m, height=700, use_container_width=True,
-                            returned_objects=["last_clicked"], key="map")
-
-        # 地图点击 -> 同步全局所选城市
-        last = (res or {}).get("last_clicked") if isinstance(res, dict) else None
-        if last and isinstance(last, dict) and "lat" in last and "lng" in last:
-            _clicked = find_city_name(float(last["lng"]), float(last["lat"]))
-            if _clicked and _clicked != st.session_state.get("current_city"):
-                st.session_state["_map_click_city"] = _clicked
-                st.rerun()
+            # 静态渲染: 使用 Streamlit 内置组件通道, 避免 streamlit-folium 前端资源间歇性加载失败
+            components.html(m.get_root().render(), height=720, scrolling=False)
 
     # ---------- 右列: 全省旱涝面积概览 + 重点治理靶区 Top3 ----------
     with col_right:
