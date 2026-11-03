@@ -1,8 +1,8 @@
 # Streamlit Cloud 部署依赖 (Python 3.12)
 # 版本策略: 下限为已验证可用的最低版本, 上限锁定当前大版本, 避免云端解析到破坏性大版本更新
-streamlit>=1.40,<2.0
-streamlit-folium>=0.20,<1.0
-folium>=0.17,<0.20
+streamlit==1.64.0
+streamlit-folium==0.27.4
+folium==0.20.0
 numpy>=1.26,<3.0
 pandas>=2.0,<3.0
 openpyxl>=3.1.0,<4.0
