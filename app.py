@@ -24,7 +24,7 @@ if _pylibs.exists():
 import folium
 import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components
+from streamlit_folium import st_folium
 
 import matplotlib
 matplotlib.use("Agg")
@@ -419,27 +419,14 @@ def _rgba_of(arr, vmin, vmax, cmap_name, flip=False):
     return rgba
 
 
-def _fig_to_uri(rgba, cell_px=30, dpi=100, clip_mask=None):
-    from scipy.ndimage import gaussian_filter
-    # 云图晕染: 预乘 alpha 高斯模糊, 柔化像元硬边界、消除马赛克感 (类似气象云图)。
-    # 预乘 alpha 可避免透明区(nodata/省界外)的黑色在模糊时污染边缘颜色, 边缘自然过渡。
-    sigma = 1.5
-    alpha = rgba[..., 3:4]
-    premult = rgba[..., :3] * alpha
-    rgb_blur = np.stack([gaussian_filter(premult[..., c], sigma) for c in range(3)], axis=-1)
-    a_blur = gaussian_filter(alpha[..., 0], sigma)[..., None]
-    rgb_blur = np.clip(rgb_blur / np.maximum(a_blur, 1e-9), 0, 1)
-    if clip_mask is not None:
-        # 仅在省界内保留晕染, 矢量边界外强制透明, 防止模糊颜色越界。
-        a_blur *= clip_mask[..., None]
-    rgba = np.concatenate([rgb_blur, a_blur], axis=-1)
+def _fig_to_uri(rgba, cell_px=40, dpi=100):
     h, w = rgba.shape[0], rgba.shape[1]
     fig = plt.figure(figsize=(w / cell_px, h / cell_px), dpi=dpi)
     ax = fig.add_axes([0, 0, 1, 1])
     ax.axis("off")
     ax.imshow(rgba, interpolation="bilinear")
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", transparent=True)
+    fig.savefig(buf, format="png", transparent=True, pil_kwargs={"optimize": True})
     plt.close(fig)
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
@@ -478,18 +465,7 @@ def render_product_png(version, product_key, band_idx):
     else:  # hurst
         arr, bounds = load_array(str(VERSIONS[version]["hurst"]))
         rgba = _rgba_of(arr, 0.0, 1.0, "PuOr", flip=True)
-
-    # 用河南省矢量边界栅格化裁切晕染后的透明度: 省内柔和过渡, 省外严格透明。
-    from rasterio.features import geometry_mask
-    from rasterio.transform import from_bounds
-
-    clip_mask = geometry_mask(
-        load_city_gdf().geometry,
-        out_shape=rgba.shape[:2],
-        transform=from_bounds(*bounds, rgba.shape[1], rgba.shape[0]),
-        invert=True,
-    )
-    return _fig_to_uri(rgba, clip_mask=clip_mask), bounds
+    return _fig_to_uri(rgba), bounds
 
 
 @st.cache_data
@@ -668,9 +644,12 @@ if "current_table_name" not in st.session_state:
 # 主分析数据层级固定为浅层根区 (0-28cm, 与冬小麦产量相关性最强)
 version = "浅层根区（0-28cm）"
 
-# ---- 处理图层卡片点击回传的延迟写入 (在控件实例化前写入, 规避 StreamlitWidgetAlreadyInstantiatedError) ----
-# Streamlit 规定: 控件一旦实例化(带 key), 之后不能再直接写该 key。故图层卡片点击
-# 先写入独立的"请求键", 再 st.rerun(); 本轮在控件创建前把它回填到 map_layer。
+# ---- 处理地图/卡片点击回传的延迟写入 (在侧边栏控件实例化前写入, 规避 StreamlitWidgetAlreadyInstantiatedError) ----
+# Streamlit 规定: 控件一旦实例化(带 key), 之后不能再直接写该 key。故地图点击/图层卡片点击
+# 先写入独立的"请求键", 再 st.rerun(); 本轮在控件创建前把它们回填到 current_city / map_layer。
+_request_city = st.session_state.pop("_map_click_city", None)
+if _request_city and _request_city in city_names:
+    st.session_state["current_city"] = _request_city
 _request_layer = st.session_state.pop("_map_layer_request", None)
 if _request_layer and _request_layer in [p["key"] for p in PRODUCTS]:
     st.session_state["map_layer"] = _request_layer
@@ -869,9 +848,16 @@ with tab1:
             ))
             city_s, city_w, city_n, city_e = load_city_bounds()
             m.fit_bounds([[city_s, city_w], [city_n, city_e]], padding=(4, 4))
-            # 静态渲染 folium 地图: 走 Streamlit 内置组件通道 (components.html),
-            # 不加载 streamlit-folium 的前端 bundle, 彻底规避 Cloud 上的间歇性组件加载失败
-            components.html(m.get_root().render(), height=720, scrolling=False)
+            res = st_folium(m, height=700, use_container_width=True,
+                            returned_objects=["last_clicked"], key="map")
+
+        # 地图点击 -> 同步全局所选城市
+        last = (res or {}).get("last_clicked") if isinstance(res, dict) else None
+        if last and isinstance(last, dict) and "lat" in last and "lng" in last:
+            _clicked = find_city_name(float(last["lng"]), float(last["lat"]))
+            if _clicked and _clicked != st.session_state.get("current_city"):
+                st.session_state["_map_click_city"] = _clicked
+                st.rerun()
 
     # ---------- 右列: 全省旱涝面积概览 + 重点治理靶区 Top3 ----------
     with col_right:
