@@ -419,7 +419,7 @@ def _rgba_of(arr, vmin, vmax, cmap_name, flip=False):
     return rgba
 
 
-def _fig_to_uri(rgba, cell_px=30, dpi=100):
+def _fig_to_uri(rgba, cell_px=30, dpi=100, clip_mask=None):
     from scipy.ndimage import gaussian_filter
     # 云图晕染: 预乘 alpha 高斯模糊, 柔化像元硬边界、消除马赛克感 (类似气象云图)。
     # 预乘 alpha 可避免透明区(nodata/省界外)的黑色在模糊时污染边缘颜色, 边缘自然过渡。
@@ -429,6 +429,9 @@ def _fig_to_uri(rgba, cell_px=30, dpi=100):
     rgb_blur = np.stack([gaussian_filter(premult[..., c], sigma) for c in range(3)], axis=-1)
     a_blur = gaussian_filter(alpha[..., 0], sigma)[..., None]
     rgb_blur = np.clip(rgb_blur / np.maximum(a_blur, 1e-9), 0, 1)
+    if clip_mask is not None:
+        # 仅在省界内保留晕染, 矢量边界外强制透明, 防止模糊颜色越界。
+        a_blur *= clip_mask[..., None]
     rgba = np.concatenate([rgb_blur, a_blur], axis=-1)
     h, w = rgba.shape[0], rgba.shape[1]
     fig = plt.figure(figsize=(w / cell_px, h / cell_px), dpi=dpi)
@@ -475,7 +478,18 @@ def render_product_png(version, product_key, band_idx):
     else:  # hurst
         arr, bounds = load_array(str(VERSIONS[version]["hurst"]))
         rgba = _rgba_of(arr, 0.0, 1.0, "PuOr", flip=True)
-    return _fig_to_uri(rgba), bounds
+
+    # 用河南省矢量边界栅格化裁切晕染后的透明度: 省内柔和过渡, 省外严格透明。
+    from rasterio.features import geometry_mask
+    from rasterio.transform import from_bounds
+
+    clip_mask = geometry_mask(
+        load_city_gdf().geometry,
+        out_shape=rgba.shape[:2],
+        transform=from_bounds(*bounds, rgba.shape[1], rgba.shape[0]),
+        invert=True,
+    )
+    return _fig_to_uri(rgba, clip_mask=clip_mask), bounds
 
 
 @st.cache_data
