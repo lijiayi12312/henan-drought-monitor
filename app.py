@@ -419,7 +419,7 @@ def _rgba_of(arr, vmin, vmax, cmap_name, flip=False):
     return rgba
 
 
-def _fig_to_uri(rgba, cell_px=10, dpi=100):
+def _fig_to_uri(rgba, cell_px=30, dpi=100):
     h, w = rgba.shape[0], rgba.shape[1]
     fig = plt.figure(figsize=(w / cell_px, h / cell_px), dpi=dpi)
     ax = fig.add_axes([0, 0, 1, 1])
