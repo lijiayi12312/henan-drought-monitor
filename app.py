@@ -420,6 +420,16 @@ def _rgba_of(arr, vmin, vmax, cmap_name, flip=False):
 
 
 def _fig_to_uri(rgba, cell_px=30, dpi=100):
+    from scipy.ndimage import gaussian_filter
+    # 云图晕染: 预乘 alpha 高斯模糊, 柔化像元硬边界、消除马赛克感 (类似气象云图)。
+    # 预乘 alpha 可避免透明区(nodata/省界外)的黑色在模糊时污染边缘颜色, 边缘自然过渡。
+    sigma = 1.5
+    alpha = rgba[..., 3:4]
+    premult = rgba[..., :3] * alpha
+    rgb_blur = np.stack([gaussian_filter(premult[..., c], sigma) for c in range(3)], axis=-1)
+    a_blur = gaussian_filter(alpha[..., 0], sigma)[..., None]
+    rgb_blur = np.clip(rgb_blur / np.maximum(a_blur, 1e-9), 0, 1)
+    rgba = np.concatenate([rgb_blur, a_blur], axis=-1)
     h, w = rgba.shape[0], rgba.shape[1]
     fig = plt.figure(figsize=(w / cell_px, h / cell_px), dpi=dpi)
     ax = fig.add_axes([0, 0, 1, 1])
