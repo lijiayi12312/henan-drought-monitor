@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-r"""浅层根区 SSI x 产量距平 相关性诊断 (n=162 市-年配对)
-链路与 yield_ssi_analysis_layers.py 完全一致, 在此基础上:
-  1. 提取 浅层根区 SSI x 产量距平 配对数据
+r"""浅层根区 SSI x 单产距平 相关性诊断 (n=162 市-年配对)
+配对数据直接取自 city_yield_ssi_timeseries_shallow.csv (gen_shallow_timeseries.py 生成,
+单产口径: 实际单产(吨/公顷)=总产(万吨)/播种面积(千公顷)×10, 分市线性去趋势):
+  1. 提取 浅层根区 SSI x 单产距平 配对数据
   2. Pearson r + Spearman rho 双指标 (检验极端年份是否主导整体相关性)
-  3. 散点图 (x=SSI, y=产量距平) + 线性拟合线
+  3. 散点图 (x=SSI, y=单产距平) + 线性拟合线
   4. 异常年份 2018 (霜冻) / 2023 (烂场雨) 用不同颜色标出
-  5. 打印斜率与截距; 图存 output/浅层SSI_产量距平_散点诊断.png
+  5. 打印斜率与截距; 图存 output/浅层SSI_单产距平_散点诊断.png
 运行:  设 PYTHONPATH=C:\pylibs 后 python corr_scatter_diagnosis.py
 """
 from pathlib import Path
@@ -16,16 +17,11 @@ import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import geopandas as gpd
-import rasterio
-from rasterio.features import geometry_mask
 from scipy import stats
 
 ROOT = Path(__file__).resolve().parent.parent
-YIELD_XLSX = ROOT / "data" / "henan_wheat_yield.xlsx"   # 年份/城市/夏粮产量(万吨), 2016-2024
-CITY_SHP = ROOT / "data" / "河南省市shp" / "河南省.shp"
-SSI_TIF = ROOT / "data" / "4-5月河南SSI" / "4-5月河南SSI_shallow_2016-2025.tif"  # 浅层根区 20 波段
-OUT_PNG = ROOT / "output" / "浅层SSI_产量距平_散点诊断.png"
+SERIES_CSV = ROOT / "output" / "产量关联分析" / "city_yield_ssi_timeseries_shallow.csv"
+OUT_PNG = ROOT / "output" / "浅层SSI_单产距平_散点诊断.png"
 
 # 深色主题 (与 plot_layer_corr_bar.py 一致)
 FONT = ROOT / "assets" / "NotoSansCJKsc-Regular.otf"
@@ -55,54 +51,13 @@ def norm_city(name):
 
 
 def main():
-    # ============ 1. 提取配对数据 (链路复刻 yield_ssi_analysis_layers.py) ============
-    gdf = gpd.read_file(CITY_SHP, encoding="utf-8")
-    if gdf.crs and gdf.crs.to_epsg() != 4326:
-        gdf = gdf.to_crs(4326)
-
-    df = pd.read_excel(YIELD_XLSX)
-    df.columns = ["年份", "城市", "产量"]
-    df["年份"] = df["年份"].astype(int)
-    df["key"] = df["城市"].map(norm_city)
-
-    records = []
-    for key, g in df.groupby("key"):
-        g = g.sort_values("年份")
-        y = g["产量"].to_numpy(float)
-        x = g["年份"].to_numpy(float)
-        a, b = np.polyfit(x, y, 1)
-        trend = a * x + b
-        for yr, yi, ti in zip(x.astype(int), y, trend):
-            records.append({"年份": yr, "key": key, "距平": yi - ti})
-    yield_df = pd.DataFrame(records)
-
-    with rasterio.open(SSI_TIF) as src:
-        cube = src.read().astype(np.float64)                # (20, rows, cols)
-        nodata = src.nodata
-        transform, h, w = src.transform, src.height, src.width
-    if nodata is not None:
-        cube[cube <= nodata] = np.nan
-
-    ssi_recs = []
-    for _, rrow in gdf.iterrows():
-        name = str(rrow["name"])
-        key = name[:-1] if name.endswith("市") else name
-        m = geometry_mask([rrow.geometry], out_shape=(h, w), transform=transform,
-                          invert=True, all_touched=True)
-        for i, yr in enumerate(range(2016, 2026)):          # 波段 2i=4月, 2i+1=5月
-            b = cube[2 * i: 2 * i + 2][:, m]
-            b = b[np.isfinite(b)]
-            if b.size == 0:
-                continue
-            ssi_recs.append({"年份": yr, "key": key, "SSI": float(b.mean())})
-    ssi_df = pd.DataFrame(ssi_recs)
-
-    mg = yield_df.merge(ssi_df[["年份", "key", "SSI"]], on=["年份", "key"], how="left")
-    mg = mg.dropna(subset=["SSI"]).reset_index(drop=True)
+    # ============ 1. 提取配对数据 (读单产口径时序表, 与主链路 gen_shallow_timeseries.py 一致) ============
+    mg = pd.read_csv(SERIES_CSV)
+    mg = mg.dropna(subset=["SSI", "单产距平"]).reset_index(drop=True)
     print(f"配对样本: n = {len(mg)} (市-年, 2016-2024)")
 
     x = mg["SSI"].to_numpy(float)
-    y = mg["距平"].to_numpy(float)
+    y = mg["单产距平"].to_numpy(float)
 
     # ============ 2. Pearson + Spearman ============
     r_p, p_p = stats.pearsonr(x, y)
@@ -110,7 +65,7 @@ def main():
     slope, intercept = np.polyfit(x, y, 1)
     print(f"\nPearson  r   = {r_p:+.4f}   (p = {p_p:.3e})")
     print(f"Spearman rho = {rho_s:+.4f}   (p = {p_s:.3e})")
-    print(f"线性拟合: 产量距平 = {slope:.4f} × SSI + {intercept:.4f}")
+    print(f"线性拟合: 单产距平 = {slope:.4f} × SSI + {intercept:.4f}")
 
     # ============ 3-5. 散点图 + 拟合线 + 异常年标注 ============
     fig, ax = plt.subplots(figsize=(9.5, 6.8), dpi=150)
@@ -148,8 +103,8 @@ def main():
     leg.get_frame().set_alpha(0.9)
 
     ax.set_xlabel("4-5 月 浅层根区 SSI (负=偏干, 正=偏湿)", fontsize=13, color=C_AXIS)
-    ax.set_ylabel("产量距平 (万吨, 负=减产)", fontsize=13, color=C_AXIS)
-    ax.set_title("浅层根区 SSI x 冬小麦产量距平 散点诊断 (2016-2024, 市-年)",
+    ax.set_ylabel("单产距平 (吨/公顷, 负=减产)", fontsize=13, color=C_AXIS)
+    ax.set_title("浅层根区 SSI x 冬小麦单产距平 散点诊断 (2016-2024, 市-年)",
                  fontsize=14.5, color=C_TXT, pad=12)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)

@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-SSI 与冬小麦(夏粮)产量关联分析
+SSI 与冬小麦单产关联分析 (单产口径)
 ----------------------------------
-1. 各市产量去趋势 (一元线性回归): 产量距平 = 实际产量 - 趋势产量
+0. 实际单产(吨/公顷) = 冬小麦总产(万吨) / 播种面积(千公顷) × 10
+   (数据源: henan_wheat_yield_clean.csv 勘误版总产 + 河南省各市冬小麦播种面积.xlsx, 同论文口径)
+1. 各市单产去趋势 (一元线性回归): 单产距平 = 实际单产 - 趋势单产
 2. SSI 栅格 (4-5月, 2016-2025) 按地级市边界提取每年 4-5 月平均 SSI
 3. 按 年份+城市 合并 -> Pearson 相关 (r, p)
 4. 按干旱等级分组平均减产率: 轻度 [-1.0,-0.5) / 中度 [-1.5,-1.0) / 重度 (<=-1.5)
-5. 输出 city_yield_analysis.csv + 控制台明细
+5. 输出 city_yield_analysis.csv + 时序表 city_yield_ssi_timeseries.csv (平台双Y轴图数据源)
 """
 from pathlib import Path
+import re
 
 import numpy as np
 import pandas as pd
@@ -18,7 +21,8 @@ from rasterio.features import geometry_mask
 from scipy import stats
 
 ROOT = Path(__file__).resolve().parent.parent
-YIELD_XLSX = ROOT / "data" / "henan_wheat_yield.xlsx"   # 年份/城市/夏粮产量(万吨), 2016-2024
+YIELD_CSV = ROOT / "data" / "henan_wheat_yield_clean.csv"   # 冬小麦总产(万吨), 18市×2016-2024, 勘误版
+AREA_XLSX = ROOT / "data" / "河南省各市冬小麦播种面积.xlsx"   # 宽表: 行=各市, 列=2016-2024年, 值=千公顷
 SSI_TIF = ROOT / "data" / "4-5月河南SSI" / "4-5月河南SSI_swvl1_2016-2025.tif"   # 20 波段: 每年 4,5 月 (原 4-5月河南SSI_2016-2025.tif, 已并入 _swvl1 命名)
 CITY_SHP = ROOT / "data" / "河南省市shp" / "河南省.shp"
 OUT_CSV = ROOT / "output" / "产量关联分析" / "city_yield_analysis.csv"
@@ -27,38 +31,66 @@ OUT_TS = ROOT / "output" / "产量关联分析" / "city_yield_ssi_timeseries.csv
 
 def norm_city(name):
     """城市名规整: 去"示范区"/"市"后缀, 对齐 Excel/shp 两侧 (济源示范区/济源市 -> 济源)"""
-    n = str(name).strip()
+    n = "".join(str(name).split())   # 去内部空格(如"郑  州  市"->"郑州市")
     for suf in ("示范区", "市"):
         if n.endswith(suf) and len(n) > len(suf):
             return n[: -len(suf)]
     return n
 
 
-# ---------- 1. 产量数据: 去趋势 -> 距平与减产率 ----------
-def load_yield_anomaly():
-    """各市产量对年份线性回归剔除技术趋势, 返回 DataFrame[年份, 城市, 实际产量, 趋势产量, 距平, 减产率%]"""
-    df = pd.read_excel(YIELD_XLSX)
-    df.columns = ["年份", "城市", "产量"]
-    df["年份"] = df["年份"].astype(int)
-    df["key"] = df["城市"].map(norm_city)
+# ---------- 0. 播种面积宽表 -> 长表 (逻辑同论文项目 12_plots_final.load_area) ----------
+def load_area():
+    """返回 DataFrame[key, 年份, 面积(千公顷)]"""
+    raw = pd.read_excel(AREA_XLSX, header=None)
+    year_cols = {}
+    for j, v in enumerate(raw.iloc[1]):
+        m = re.fullmatch(r"(\d{4})年", str(v).strip()) if pd.notna(v) else None
+        if m:
+            year_cols[int(m.group(1))] = j
+    assert sorted(year_cols) == list(range(2016, 2025)), f"面积表年份列异常: {sorted(year_cols)}"
     records = []
-    for key, g in df.groupby("key"):
-        g = g.sort_values("年份")
-        n = len(g)
-        note = ""
-        if n < 3:  # 点太少无法拟合趋势
-            note = f"样本不足({n}年), 跳过趋势剔除"
-            print(f"[缺失] {g['城市'].iloc[0]}: {note}")
+    for i in range(2, len(raw)):
+        name = raw.iloc[i, 0]
+        if pd.isna(name):
             continue
-        y = g["产量"].to_numpy(float)
+        key = norm_city(name)
+        if key in ("全省", "各市之和"):
+            continue
+        for yr, j in year_cols.items():
+            records.append({"key": key, "年份": yr,
+                            "面积": pd.to_numeric(raw.iloc[i, j], errors="coerce")})
+    df = pd.DataFrame(records)
+    assert df["key"].nunique() == 18 and len(df) == 162, f"面积表应为18市×9年=162行, 实际{len(df)}"
+    assert df["面积"].notna().all() and (df["面积"] > 0).all(), "面积存在缺失或非正值"
+    return df
+
+
+# ---------- 1. 单产数据: 去趋势 -> 距平与减产率 ----------
+def load_yield_anomaly():
+    """单产口径 (同论文): 实际单产(吨/公顷) = 总产(万吨)/面积(千公顷)×10;
+    各市对年份线性回归剔除技术趋势, 返回 DataFrame[年份, key, 城市, 实际单产, 趋势单产, 单产距平, 减产率%]"""
+    ydf = pd.read_csv(YIELD_CSV)
+    ydf = ydf[["city", "key", "year", "yield"]].rename(
+        columns={"city": "城市", "year": "年份", "yield": "总产"})
+    ydf["年份"] = ydf["年份"].astype(int)
+    mg = ydf.merge(load_area(), on=["key", "年份"], how="inner")
+    assert len(mg) == 162, f"产量×面积合并后应为162行, 实际{len(mg)}"
+    mg["实际单产"] = mg["总产"] / mg["面积"] * 10.0
+    records = []
+    for key, g in mg.groupby("key"):
+        g = g.sort_values("年份")
+        if len(g) < 3:  # 点太少无法拟合趋势
+            print(f"[缺失] {g['城市'].iloc[0]}: 样本不足({len(g)}年), 跳过趋势剔除")
+            continue
+        y = g["实际单产"].to_numpy(float)
         x = g["年份"].to_numpy(float)
-        a, b = np.polyfit(x, y, 1)          # 线性趋势产量
+        a, b = np.polyfit(x, y, 1)          # 线性趋势单产
         trend = a * x + b
-        anom = y - trend                     # 产量距平 (气象产量)
+        anom = y - trend                     # 单产距平 (气象单产)
         loss = anom / trend * 100.0          # 减产率% (负=减产)
         for yr, yi, ti, ai, li in zip(x.astype(int), y, trend, anom, loss):
             records.append({"年份": yr, "key": key, "城市": g["城市"].iloc[0],
-                            "实际产量": yi, "趋势产量": ti, "距平": ai, "减产率%": li})
+                            "实际单产": yi, "趋势单产": ti, "单产距平": ai, "减产率%": li})
     return pd.DataFrame(records)
 
 # ---------- 2. SSI 栅格: 按市边界提取每年 4-5 月平均 ----------
@@ -100,7 +132,7 @@ mg = yield_df.merge(ssi_df[["年份", "key", "SSI"]], on=["年份", "key"], how=
 
 # ---------- 逐年时间序列表 (含 2025 年仅有 SSI 的行, 供平台双Y轴图使用) ----------
 ts = ssi_df[["年份", "key", "SSI"]].merge(
-    yield_df[["年份", "key", "城市", "实际产量", "趋势产量", "距平", "减产率%"]],
+    yield_df[["年份", "key", "城市", "实际单产", "趋势单产", "单产距平", "减产率%"]],
     on=["年份", "key"], how="left")
 _name_map = yield_df.drop_duplicates("key").set_index("key")["城市"]
 ts["城市"] = ts["城市"].fillna(ts["key"].map(_name_map))
@@ -108,7 +140,7 @@ ts = ts.sort_values(["key", "年份"])
 ts.to_csv(OUT_TS, index=False, encoding="utf-8-sig")
 print(f"时间序列表已保存: {OUT_TS}  ({len(ts)} 行)")
 
-print("\n================ SSI x 产量距平: 各市结果 ================")
+print("\n================ SSI x 单产距平: 各市结果 ================")
 rows = []
 for key, g in mg.groupby("key"):
     city = g["城市"].iloc[0]
@@ -122,7 +154,7 @@ for key, g in mg.groupby("key"):
                      "中度平均减产率%": np.nan, "中度样本": 0,
                      "重度平均减产率%": np.nan, "重度样本": 0, "备注": "有效配对样本不足"})
         continue
-    r, p = stats.pearsonr(g["SSI"], g["距平"])
+    r, p = stats.pearsonr(g["SSI"], g["单产距平"])
     sig = "*" if p < 0.05 else ""
     # 干旱等级分组 (只统计 SSI<-0.5 的年份): 轻 [-1.0,-0.5) 中 [-1.5,-1.0) 重 <=-1.5
     bins = {"轻度": (-1.0, -0.5), "中度": (-1.5, -1.0), "重度": (-np.inf, -1.5)}
@@ -144,7 +176,7 @@ for key, g in mg.groupby("key"):
 # 全省汇总 (所有市-年观测按等级合并, 统计意义更强)
 print("\n---------------- 全省汇总 (全部市-年观测) ----------------")
 g_all = mg.dropna(subset=["SSI"])
-r_all, p_all = stats.pearsonr(g_all["SSI"], g_all["距平"])
+r_all, p_all = stats.pearsonr(g_all["SSI"], g_all["单产距平"])
 print(f"全部观测 n={len(g_all)}, Pearson r={r_all:+.3f}, p={p_all:.2e}")
 for lvl, (lo, hi) in {"轻度": (-1.0, -0.5), "中度": (-1.5, -1.0), "重度": (-np.inf, -1.5)}.items():
     sub = g_all[(g_all["SSI"] >= lo) & (g_all["SSI"] < hi)]

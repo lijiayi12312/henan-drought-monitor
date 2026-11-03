@@ -71,7 +71,7 @@ PRODUCTS = [
     {"key": "freq_wet", "icon": "🌧️", "name": "历史偏湿频率", "sub": "SSI>0 月份占比"},
     {"key": "trend_dry", "icon": "🔴", "name": "未来干旱高风险区", "sub": "Sen<-0.15 且 Hurst>0.5 · 仅展示高风险区域"},
     {"key": "trend_wet", "icon": "🔵", "name": "未来渍害高风险区", "sub": "Sen>0.02 且 Hurst>0.5 · 仅展示高风险区域"},
-    {"key": "hurst", "icon": "🔁", "name": "Hurst 持续性", "sub": "趋势持续性指数"},
+    {"key": "hurst", "icon": "🔁", "name": "未来风险演变趋势", "sub": "趋势持续性指数"},
 ]
 
 # Tab2 核心数据集卡片 (2行3列)
@@ -186,6 +186,25 @@ def city_mean_ssi(city, cube, transform, band_idx):
 
 
 @st.cache_data
+def city_layer_mean(version, layer_key, city):
+    """该市边界内单波段分析图层 (Sen 斜率 / Hurst 指数) 的均值 (all_touched 掩膜)"""
+    from rasterio.features import geometry_mask
+
+    arr, _ = load_array(str(VERSIONS[version][layer_key]))
+    gdf = load_city_gdf()
+    row = gdf[gdf["name"] == city]
+    if row.empty:
+        return np.nan
+    with rasterio.open(VERSIONS[version][layer_key]) as src:
+        transform = src.transform
+    mask = geometry_mask(list(row.geometry), out_shape=arr.shape, transform=transform,
+                         invert=True, all_touched=True)
+    vals = arr[mask]
+    vals = vals[np.isfinite(vals)]
+    return float(vals.mean()) if vals.size else np.nan
+
+
+@st.cache_data
 def city_ssi_all(version, band_idx):
     """全部 18 市在当前波段的 SSI 均值 {城市名: 值}, 供极值城市 Top3 图"""
     from rasterio.features import geometry_mask
@@ -203,19 +222,89 @@ def city_ssi_all(version, band_idx):
     return out
 
 
-def stress_level(ssi):
-    """SSI -> (等级名, 颜色); 红=偏干, 蓝=偏湿 (全系统统一: 红=干旱风险, 蓝=渍害风险)"""
+def get_diagnosis(ssi):
+    """SSI 统一诊断入口 (五档科学阈值) —— 顶部等级徽章 / 中间预警框 / 底部治理决策
+    三处共用此函数, 保证等级文本、预警颜色、治理建议永远一致。
+    阈值: 极强偏湿>=1.5 | 轻度偏湿[0.5,1.5) | 正常(-0.5,0.5) | 轻度偏干(-1.5,-0.5] | 重度偏干<=-1.5
+    返回 dict: level(等级文本) / alert(error|warning|success|info) / color(徽章色) /
+              head(预警框标题) / diag(诊断一句话) / advice(治理建议)"""
     if not np.isfinite(ssi):
-        return "无数据", "#9aa3af"
-    for lo, hi, name, color in [
-        (-99, -2.0, "极端偏干", "#67000d"), (-2.0, -1.0, "重度偏干", "#cb181d"),
-        (-1.0, -0.5, "轻度偏干", "#fb6a4a"), (-0.5, 0.5, "正常", "#41ab5d"),
-        (0.5, 1.0, "轻度偏湿", "#6baed6"), (1.0, 1.5, "中度偏湿", "#2171b5"),
-        (1.5, 2.0, "重度偏湿", "#08519c"), (2.0, 99, "极端偏湿", "#08306b"),
-    ]:
-        if lo <= ssi < hi:
-            return name, color
-    return "正常", "#41ab5d"
+        return {"level": "无数据", "alert": "info", "color": "#9aa3af",
+                "head": "⬜ 暂无数据", "diag": "该区域当前月份无有效 SSI 像元",
+                "advice": "该区域当前月份无有效 SSI 像元，暂无法生成治理决策建议。"}
+    if ssi >= 1.5:
+        return {"level": "极强偏湿（涝灾）", "alert": "error", "color": "#08306b",
+                "head": "⚠️ 涝灾高风险预警", "diag": "当前处于极强偏湿风险区（涝灾高风险）",
+                "advice": ("治理路径建议：\n"
+                           "1. 工程改造：建议在“十五五”高标准农田建设中，重点排查并疏通该区末级排水沟渠（毛沟、斗沟），提升排涝标准。\n"
+                           "2. 应急响应：5月灌浆成熟期若遇连阴雨，需提前跨区调配履带式收割机，并启用应急排涝泵站。\n"
+                           "3. 理念转变：扭转“重灌轻排”倾向，排涝与保墒并重。")}
+    if ssi >= 0.5:
+        return {"level": "轻度偏湿", "alert": "warning", "color": "#6baed6",
+                "head": "🌧️ 偏湿预警", "diag": "当前呈轻度偏湿态势",
+                "advice": "建议关注灌浆—收获期降水过程，提前疏通排涝设施，防范根系渍害与田间积水。"}
+    if ssi > -0.5:
+        return {"level": "正常波动", "alert": "success", "color": "#41ab5d",
+                "head": "✅ 水分正常", "diag": "当前水分条件正常，属于常规稳产区",
+                "advice": "维持现有农田水利管护机制，做好常态化监测。"}
+    if ssi > -1.5:
+        return {"level": "轻度偏干", "alert": "warning", "color": "#fb6a4a",
+                "head": "🌵 偏干预警", "diag": "当前呈轻度偏干态势",
+                "advice": "建议做好灌溉补水调度，优先保障拔节—抽穗期关键水分供应。"}
+    return {"level": "重度偏干（旱灾）", "alert": "error", "color": "#cb181d",
+            "head": "⚠️ 旱灾高风险预警", "diag": "当前处于重度偏干风险区（旱灾高风险）",
+            "advice": "依托现有高比例有效灌溉设施，适时进行补灌保墒，保障灌溉用水调度。"}
+
+
+def build_report_text(city, yr, month, version, ssi_v, lvl, diag_txt, advice_txt):
+    """生成单市耕地水分风险评估与治理建议报告 (纯函数)
+    每次调用从空列表重新构造, 无任何全局/累积状态, 标题与数据只出现一次。
+    """
+    sep = "=" * 52
+    lines = [
+        "河南冬小麦主产区耕地水分风险研判与数字化治理决策系统",
+        "耕地水分风险评估与治理建议报告",
+        sep,
+        f"城市：{city}",
+        f"时间：{yr} 年 {int(month[5:])} 月（4-5 月关键期）",
+        f"数据层级：{version}",
+        f"全市平均 SSI：{ssi_v:+.2f}",
+        f"水分胁迫等级：{lvl}",
+        "-" * 52,
+        f"诊断结果：{diag_txt}",
+        "",
+        advice_txt,
+        sep,
+        "注：本报告由系统基于当期 SSI 诊断自动生成，供决策参考。",
+    ]
+    return "\n".join(lines)
+
+
+SSI_STATE_BINS = [(-99, -1.5, "极端偏干"), (-1.5, -1.0, "重度偏干"), (-1.0, -0.5, "轻度偏干"),
+                  (-0.5, 0.5, "正常"), (0.5, 1.0, "轻度偏湿"), (1.0, 1.5, "中度偏湿"),
+                  (1.5, 99, "极端偏湿")]
+
+
+def ssi_state_bin(s):
+    """SSI -> 离散状态名 (七档, 供状态转移预测的转移样本分组)"""
+    for lo, hi, name in SSI_STATE_BINS:
+        if lo <= s < hi:
+            return name
+    return "正常"
+
+
+def transition_probs(series_df, cur_ssi):
+    """历史经验状态转移: 当前 SSI 状态 -> 下一年 极端偏湿(>1.5)/极端偏干(<-1.5) 的频率
+    汇总全部 18 市 2016-2024 的相邻年转移样本 (纯函数, 每次全新计算)。
+    返回 (当前状态, 样本数n, p_极湿, p_极干); 样本不足时返回 n=0。"""
+    cur_state = ssi_state_bin(cur_ssi)
+    df = series_df.dropna(subset=["SSI"]).sort_values(["key", "年份"])
+    df = df.assign(next_ssi=df.groupby("key")["SSI"].shift(-1)).dropna(subset=["next_ssi"])
+    same = df[df["SSI"].map(ssi_state_bin) == cur_state]
+    n = len(same)
+    if n == 0:
+        return cur_state, 0, np.nan, np.nan
+    return cur_state, n, float((same["next_ssi"] > 1.5).mean()), float((same["next_ssi"] < -1.5).mean())
 
 
 # ---------------- 栅格渲染 (缓存) ----------------
@@ -326,7 +415,7 @@ def render_legend_png(version, product_key):
 
 
 # ---------------- 页面 ----------------
-st.set_page_config(page_title="中原农情旱涝双端风险研判与空间态势感知系统", page_icon="🌾", layout="wide")
+st.set_page_config(page_title="河南冬小麦主产区耕地水分风险研判与数字化治理决策系统", page_icon="🌾", layout="wide")
 
 CSS = """
 <style>
@@ -423,9 +512,81 @@ table.portal-tbl { width:100%; border-collapse:collapse; font-size:13px; }
   display:inline-block; border-radius:999px; padding:4px 16px; color:#fff;
   font-size:13.5px; font-weight:700; letter-spacing:1px;
 }
+
+/* ---- Hover 公式提示 (灰色问号 + LaTeX 气泡) ---- */
+.hf-wrap { display:inline-block; position:relative; vertical-align:middle; margin-left:6px; }
+.hf-icon {
+  display:inline-flex; align-items:center; justify-content:center;
+  width:18px; height:18px; border-radius:50%;
+  background:#c6ccd6; color:#fff; font-size:12px; font-weight:600;
+  cursor:help; user-select:none; line-height:1;
+  transition:background .15s ease;
+}
+.hf-icon:hover { background:#9aa3af; }
+.hf-tip {
+  position:absolute; bottom:calc(100% + 10px); left:50%; transform:translateX(-50%);
+  background:#fff; color:#1a2433; border:1px solid #e8edf3; border-radius:12px;
+  padding:12px 16px; box-shadow:0 10px 32px rgba(16,42,80,.20);
+  white-space:nowrap; line-height:1.5;
+  opacity:0; visibility:hidden; transition:opacity .18s ease, visibility .18s ease;
+  z-index:9999; pointer-events:none;
+}
+.hf-tip::after {
+  content:""; position:absolute; top:100%; left:50%; transform:translateX(-50%);
+  border:6px solid transparent; border-top-color:#fff;
+}
+.hf-wrap:hover .hf-tip { opacity:1; visibility:visible; }
+.hf-label { font-size:11.5px; font-weight:700; color:#8a94a6; letter-spacing:.5px; margin-bottom:6px; }
+.hf-math { font-size:15px; }
+.hf-math .katex { font-size:15px; }
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
+
+# KaTeX CDN (渲染 hover 公式气泡里的 LaTeX)
+st.markdown(
+    """
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script>
+    (function(){
+      if (!window.__hfInit) {
+        window.__hfInit = true;
+        window.__hfRender = function(){
+          if (typeof katex === 'undefined') return;
+          document.querySelectorAll('.hf-math:not([data-hf-done])').forEach(function(el){
+            var txt = el.textContent.trim();
+            if (txt.slice(0,2) === '$$') txt = txt.slice(2);
+            if (txt.slice(-2) === '$$') txt = txt.slice(0, -2);
+            try { katex.render(txt, el, {displayMode:false, throwOnError:false}); }
+            catch(e){ el.textContent = txt; }
+            el.setAttribute('data-hf-done','1');
+          });
+        };
+        new MutationObserver(window.__hfRender).observe(document.body, {childList:true, subtree:true});
+        window.addEventListener('load', window.__hfRender);
+      }
+      if (typeof katex !== 'undefined') { window.__hfRender(); }
+      else { document.addEventListener('DOMContentLoaded', window.__hfRender); }
+    })();
+    </script>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def hover_formula(text, formula):
+    """灰色问号悬浮图标: 悬停弹出带 LaTeX 公式的白色气泡。
+    text 为气泡顶部标签 (如 "SSI公式"), formula 为 LaTeX 源码 (内部用 $$ 包裹由 KaTeX 渲染)。"""
+    st.markdown(
+        f'<span class="hf-wrap" title="{text}">'
+        f'<span class="hf-icon">?</span>'
+        f'<span class="hf-tip">'
+        f'<span class="hf-label">{text}</span>'
+        f'<span class="hf-math">$${formula}$$</span>'
+        f'</span></span>',
+        unsafe_allow_html=True,
+    )
 
 # ---- Hero 视觉大图 Banner (实景背景 + 深色遮罩) ----
 @st.cache_data
@@ -441,8 +602,8 @@ st.markdown(
     <div class="hero-banner" style="background-image:{_bg};">
       <div class="hero-overlay"></div>
       <div class="hero-inner">
-        <h1>中原农情旱涝双端风险研判与空间态势感知系统</h1>
-        <p class="sub">Henan Agro-moisture Risk Assessment &amp; Spatial Situation Awareness System · 覆盖 2016-2025 年多深度土壤水分数据集</p>
+        <h1>河南冬小麦主产区耕地水分风险研判与数字化治理决策系统</h1>
+        <p class="sub">Henan Winter Wheat Cropland Moisture Risk Assessment &amp; Digital Governance Decision Support System · 覆盖 2016-2025 年多深度土壤水分数据集</p>
       </div>
     </div>
     """,
@@ -586,7 +747,7 @@ with tab_map:
             st.plotly_chart(fig_pie, use_container_width=True)
 
         with st.container(border=True):
-            st.markdown(f'<div class="card-title">🏙️ 当前极值城市 Top 3<span class="tag">SSI 最低 / 最高</span></div>',
+            st.markdown(f'<div class="card-title">🏙️ 重点治理靶区 Top3<span class="tag">SSI 最低 / 最高</span></div>',
                         unsafe_allow_html=True)
             srt = sorted(((k, v) for k, v in city_ssi_all(version, band_idx).items()
                           if np.isfinite(v)), key=lambda kv: kv[1])
@@ -699,7 +860,8 @@ with tab_map:
                 st.info("点击位置不在任何地级市界内, 请点击河南省内区域")
             else:
                 ssi_v = city_mean_ssi(city, cube, transform, band_idx)
-                lvl, lvl_color = stress_level(ssi_v)
+                diag = get_diagnosis(ssi_v)   # 统一诊断入口: 徽章/预警框/治理决策三处共用
+                lvl, alert_type, lvl_color = diag["level"], diag["alert"], diag["color"]
                 yr = int(month[:4])
                 key = norm_city(city)
                 ser = load_yield_series(version)
@@ -715,6 +877,7 @@ with tab_map:
                 with d_col:
                     r1c1, r1c2 = st.columns(2)
                     r1c1.metric("全市平均 SSI", f"{ssi_v:+.2f}" if np.isfinite(ssi_v) else "—")
+                    hover_formula("SSI 计算公式", r"SSI_{it} = \frac{X_{it} - \bar{X}_i}{\sigma_i}")
                     with r1c2:
                         st.markdown(
                             f"<div style='font-size:13px;color:#5b6572'>水分胁迫等级</div>"
@@ -734,37 +897,26 @@ with tab_map:
                         f"<div style='font-size:11px;color:#9aa3af'>实际产量 − 线性趋势产量</div>",
                         unsafe_allow_html=True)
                 with j_col:
-                    # 动态研判文字
-                    if not np.isfinite(ssi_v):
-                        head, body, bg, bd, fc = ("⬜ 暂无数据",
-                                                  "该区域当前月份无有效 SSI 像元。",
+                    # 动态研判文字 (等级/标题/颜色统一来自 get_diagnosis, 与顶部徽章、底部决策永远一致)
+                    if alert_type == "info":
+                        head, body, bg, bd, fc = (diag["head"], diag["advice"],
                                                   "#f2f4f8", "#d9dee6", "#5b6572")
-                    elif ssi_v >= 0.5 and np.isfinite(loss) and loss <= -2.0:
-                        head, body, bg, bd, fc = (
-                            "⚠️ 渍害减产风险",
-                            f"该市 {yr} 年 4–5 月土壤水分显著偏湿（SSI {ssi_v:+.2f}，{lvl}），"
-                            f"当年减产 {abs(loss):.2f}%（距平 {anom:+.2f} 万吨）。"
-                            f"该市面临渍害减产风险，建议疏通排涝设施，防范根系渍害与田间积水。",
-                            "#e8f1fd", "#bcd6f5", "#0b4da2")
-                    elif ssi_v >= 0.5:
-                        loss_txt = f"当年减产率 {loss:+.2f}%，减产尚不显著" if np.isfinite(loss) \
-                            else "当年产量数据尚未公布"
-                        head, body, bg, bd, fc = (
-                            "🌧️ 偏湿监测",
-                            f"该市当期土壤水分偏湿（SSI {ssi_v:+.2f}，{lvl}），{loss_txt}。"
-                            f"渍害致减产具有生育期窗口依赖性，建议关注灌浆—收获期降水过程，提前疏通排涝设施。",
-                            "#eef6fd", "#c7e0f7", "#1d5a8c")
-                    elif ssi_v <= -0.5:
-                        head, body, bg, bd, fc = (
-                            "🌵 偏干预警",
-                            f"该市当期土壤水分偏干（SSI {ssi_v:+.2f}，{lvl}）。"
-                            f"建议准备灌溉调度，优先保障拔节—抽穗期关键水分供应。",
-                            "#fdecea", "#f5c6cb", "#8a1c1c")
                     else:
-                        head, body, bg, bd, fc = (
-                            "✅ 水分正常",
-                            f"该市当期土壤水分条件正常（SSI {ssi_v:+.2f}），产量形势总体稳定，按常规农情管理即可。",
-                            "#e9f7ef", "#b7e4c7", "#1e6b3a")
+                        loss_txt = f"当年减产率 {loss:+.2f}%" if np.isfinite(loss) \
+                            else "当年产量数据尚未公布"
+                        if alert_type == "error":
+                            head = diag["head"]
+                            bg, bd, fc = (("#fdecea", "#f5c6cb", "#8a1c1c") if ssi_v < 0
+                                          else ("#e8f1fd", "#bcd6f5", "#0b4da2"))
+                        elif alert_type == "warning":
+                            head = diag["head"]
+                            bg, bd, fc = (("#fdf1ea", "#f5d3bd", "#8a4c1c") if ssi_v < 0
+                                          else ("#eef6fd", "#c7e0f7", "#1d5a8c"))
+                        else:
+                            head = diag["head"]
+                            bg, bd, fc = "#e9f7ef", "#b7e4c7", "#1e6b3a"
+                        body = (f"该市当期 SSI {ssi_v:+.2f}，判定为【{lvl}】（{loss_txt}）。"
+                                f"{city}{diag['diag']}。{diag['advice']}")
                     st.markdown(
                         f'<div class="judge-box" style="background:{bg};border-color:{bd};color:{fc}">'
                         f'<div class="jb-head">{head}</div>{body}</div>',
@@ -800,11 +952,124 @@ with tab_map:
                                     x=0.5, xanchor="center", font_size=10),
                         paper_bgcolor="rgba(0,0,0,0)")
                     st.plotly_chart(fig_mini, use_container_width=True)
+                    # ---- Hurst × Sen 趋势研判 (图表下方) ----
+                    _hurst = city_layer_mean(version, "hurst", city)
+                    _sen = city_layer_mean(version, "sen", city)
+                    if np.isfinite(_hurst) and np.isfinite(_sen):
+                        if _hurst > 0.5 and _sen > 0:
+                            _conclu = "未来水分持续偏湿（涝害风险加剧）"
+                            _advice = "建议将排涝工程纳入未来三年储备库。"
+                        elif _hurst > 0.5 and _sen < 0:
+                            _conclu = "未来水分持续偏干（旱灾风险加剧）"
+                            _advice = "建议升级灌溉设施。"
+                        else:
+                            _conclu = "未来趋势可能反转"
+                            _advice = "维持现状，加强监测。"
+                        st.info(f"📊 **趋势研判**（Hurst {_hurst:.2f} · Sen 斜率 {_sen:+.3f}）："
+                                f"预测结论：**{_conclu}**。治理决策：{_advice}")
+                    else:
+                        st.info("📊 **趋势研判**：该市 Hurst / Sen 图层无有效像元, 暂无法生成趋势预测。")
+                    hover_formula("Hurst 持续性公式", r"E\left[\frac{R(n)}{S(n)}\right] \sim C n^H")
+                    hover_formula("Sen 斜率公式", r"\beta = \text{Median}\left\{ \frac{x_j - x_i}{j - i} \right\}")
                 if not np.isfinite(loss):
                     st.caption(f"{yr} 年产量数据尚未公布, 研判仅基于 SSI 与等级")
+
+                # ---- 系统自动生成的靶向治理决策 ----
+                st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+                st.markdown('<div class="card-title">🩺 系统自动生成的靶向治理决策'
+                            '<span class="tag">基于当期 SSI 诊断</span></div>',
+                            unsafe_allow_html=True)
+                if not np.isfinite(ssi_v):
+                    st.info("该区域当前月份无有效 SSI 像元，暂无法生成治理决策建议。")
+                else:
+                    # 诊断与建议全部来自 get_diagnosis, 与顶部徽章、中间预警框永远一致
+                    diag_txt = f"{city}{diag['diag']}。"
+                    advice_txt = diag["advice"]
+                    show = {"error": st.error, "warning": st.warning,
+                            "success": st.success}[alert_type]
+                    icon = "✅" if alert_type == "success" else "⚠️"
+                    show(f"{icon} 诊断结果：{diag_txt}")
+                    st.info(f"💡 **治理路径建议**：{advice_txt}")
+                    # 一键导出报告 (.txt) —— 纯函数生成, 每次调用全新构造, 无累积状态
+                    report = build_report_text(city, yr, month, version,
+                                               ssi_v, lvl, diag_txt, advice_txt)
+                    st.download_button(
+                        "📥 一键导出该市耕地水分风险评估与治理建议报告",
+                        data=report.encode("utf-8-sig"),
+                        file_name=f"{city}_{month}_水分风险评估与治理建议.txt",
+                        mime="text/plain", use_container_width=True)
         else:
             st.markdown('<div class="card-title">综合研判</div>', unsafe_allow_html=True)
             st.info("在地图上点击任意城市, 此处将生成该市「数据 + 研判文字」的综合研判框")
+
+# ================= 侧边栏: 智能决策推演 · 情景推演 =================
+with st.sidebar:
+    st.markdown("### 🔮 智能决策推演 · 情景推演")
+    f_ssi = st.slider("未来5月 SSI 预测值", -2.5, 2.5, 0.0, 0.1,
+                      help="负值代表干旱, 正值代表洪涝 (标准化土壤水分指数 SSI)")
+    eng_pct = st.slider("工程干预力度(%)", 0, 100, 0,
+                        help="排涝或灌溉设施的提升比例")
+    # 面板数据回归实证系数 (双端非对称): 涝端 beta1 / 旱端 beta2
+    BETA1, BETA2 = -0.1889, 0.0211
+    pred_anom = (BETA1 if f_ssi > 0 else BETA2) * f_ssi
+    eng_anom = pred_anom * (1 - eng_pct / 100 * 0.8)   # 工程干预最多挽回 80% 损失
+    m1, m2 = st.columns(2)
+    m1.metric("预测单产波动 (吨/公顷)", f"{pred_anom:+.2f}")
+    m2.metric("干预后单产波动 (吨/公顷)", f"{eng_anom:+.2f}",
+              delta=f"{eng_anom - pred_anom:+.2f} 工程挽回")
+    hover_formula("双端非对称模型", r"Y_{it} = \beta_1 SSI_{it}^{+} + \beta_2 SSI_{it}^{-} + \epsilon_{it}")
+    st.caption("基于 2016-2024 面板回归的双端非对称实证系数: 涝端 β₁=-0.1889***, "
+               "旱端 β₂=+0.0211 (波动为负=减产)")
+    if f_ssi > 0.5:
+        st.error("⚠️ **涝灾预警**：基于实证模型，涝端减产效应极强。"
+                 "建议提升高标准农田排涝标准，疏通沟渠。")
+    elif f_ssi < -0.5:
+        st.warning("⚠️ **旱灾预警**：基于实证模型，干旱会导致轻微减产（虽不显著但需防范）。"
+                   "建议完善灌溉设施保墒。")
+    else:
+        st.success("✅ 未来水分处于正常区间, 按常规农情管理, 保持常态化监测即可。")
+
+    # ---- 基于历史数据的状态转移预测 ----
+    st.markdown("---")
+    st.markdown("### 📈 历史状态转移预测")
+    _cl = st.session_state.get("click")
+    _city = find_city_name(_cl["lon"], _cl["lat"]) if _cl else None
+    if _city is None:
+        st.info("请在主地图上点击城市后, 基于该市当前 SSI 进行状态转移预测。")
+    else:
+        _ssi = city_mean_ssi(_city, cube, transform, band_idx)
+        _ser = load_yield_series(version)
+        _row = _ser[(_ser["key"] == norm_city(_city)) & (_ser["年份"] == int(month[:4]))]
+        # 当年状态: 优先用该市当年 4-5 月均值 SSI (与时序表口径一致), 缺则退回当月均值
+        _cur = float(_row["SSI"].iloc[0]) if len(_row) and np.isfinite(_row["SSI"].iloc[0]) else _ssi
+        if np.isfinite(_cur):
+            _state, _n, _pw, _pd = transition_probs(_ser, _cur)
+            if _n == 0:
+                st.warning(f"当前状态「{_state}」在 2016-2024 历史序列中无转移样本, 暂无法预测。")
+            else:
+                st.markdown(f"当前状态：**{_state}**（{_city} {month[:4]} 年 SSI {_cur:+.2f}）"
+                            f"· 历史同状态转移样本 {_n} 条")
+                st.markdown(f"模型预测：该市未来转为**极端涝害**（SSI>1.5）的概率为 **{_pw*100:.0f}%**")
+                st.progress(_pw, text=f"→ 极端偏湿 (涝害)")
+                st.markdown(f"模型预测：该市未来转为**重度干旱**（SSI<-1.5）的概率为 **{_pd*100:.0f}%**")
+                st.progress(_pd, text=f"→ 极端偏干 (旱害)")
+                if _pw >= 0.25:
+                    st.error("🚰 **转移概率治理决策**：涝害转移概率偏高，建议**修建/改造排水沟渠**——"
+                             "按高标准农田排涝规范疏浚毛沟、斗沟, 并在低洼麦田增设暗管排水。")
+                elif _pw >= 0.10:
+                    st.warning("🚰 **转移概率治理决策**：存在一定涝害转移风险, 建议开展排涝沟渠"
+                               "汛前排查与清淤, 预置移动排涝泵站。")
+                if _pd >= 0.25:
+                    st.error("💧 **转移概率治理决策**：旱害转移概率偏高，建议**加强灌溉保障**——"
+                             "检修机井与渠系配套, 制定分片区轮灌方案, 保障拔节—灌浆期用水。")
+                elif _pd >= 0.10:
+                    st.warning("💧 **转移概率治理决策**：存在一定旱害转移风险, 建议提前调度"
+                               "灌溉水源, 检修提灌设施。")
+                if _pw < 0.10 and _pd < 0.10:
+                    st.success("✅ **转移概率治理决策**：旱涝两端转移概率均较低, "
+                               "维持常态化监测与现有水利管护即可。")
+        else:
+            st.info("该市当年无有效 SSI 数据, 暂无法进行状态转移预测。")
 
 # ================= Tab 2: 旱涝属性数据库 =================
 with tab_db:
@@ -893,6 +1158,6 @@ with tab_db:
 # ---- 页脚 ----
 st.markdown(
     "<div style='text-align:center;color:#9aa3af;font-size:12px;margin:26px 0 10px'>"
-    "中原农情旱涝双端风险研判与空间态势感知系统 · 数据门户 (2016–2025, 4–5 月 SSI)</div>",
+    "河南冬小麦主产区耕地水分风险研判与数字化治理决策系统 · 数据门户 (2016–2025, 4–5 月 SSI)</div>",
     unsafe_allow_html=True,
 )

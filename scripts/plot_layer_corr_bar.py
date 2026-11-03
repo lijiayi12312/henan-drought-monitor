@@ -64,17 +64,17 @@ def main():
         ax.spines[side].set_visible(False)
     for side in ("left", "bottom"):
         ax.spines[side].set_color(C_AXIS)
-    ax.set_ylim(-0.42, 0.2)
+    ax.set_ylim(-0.75, 0.45)
     ax.set_ylabel("Pearson r", fontsize=15, color=C_AXIS)
     ax.tick_params(axis="y", colors=C_AXIS, labelsize=12)
     ax.tick_params(axis="x", colors=C_TXT, labelsize=14)
     plt.setp(ax.get_xticklabels(), rotation=-18, ha="left", rotation_mode="anchor")
 
-    # 结论文字 (图下方)
+    # 结论文字 (图下方) —— 单产口径 (单产距平 = 分市线性去趋势残差, 吨/公顷)
     fig.text(0.5, 0.012,
-             "表层（0-7cm）与浅层根区（0-28cm）同产量距平显著负相关，深层及全根区加权不显著——0-28cm 对土壤水分异常波动最敏感。\n"
-             "减产由旱涝双端中的偏湿端驱动：重度偏湿年平均减产 2.5%~2.9%，中度干旱年减产率≈0；\n"
-             "剔除 2018（湿害）、2023（烂场雨）两个偏湿灾年后 r 归零（+0.02）——样本期负相关主要由这两个年份贡献，偏旱端效应待更长序列验证。",
+             "表层（0-7cm）与浅层根区（0-28cm）同单产距平显著负相关，深层（28-100cm）呈显著正相关，全根区加权不显著。\n"
+             "减产由偏湿端驱动：重度偏湿年平均减产 3.0%~3.6%、中度偏湿减产 2.4%~3.1%；干旱端样本较少且平均减产率≈0；\n"
+             "负相关集中体现 4-5 月偏湿（渍害/烂场雨）对单产的压制，与麦田中后期排水管理的农艺逻辑一致。",
              ha="center", va="bottom", fontsize=12, color=C_TXT, wrap=True)
 
     fig.tight_layout(rect=(0, 0.12, 1, 1))
